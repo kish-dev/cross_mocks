@@ -10,7 +10,7 @@ from aiogram.types import Message, CallbackQuery
 from sqlalchemy import select, func
 
 from app.config import settings
-from app.db.models import User, Session, SessionFeedback, CandidateSet, QuickEvaluation, PairStats
+from app.db.models import User, Session, SessionFeedback, CandidateSet, QuickEvaluation, PairStats, InterviewProposal, SessionReview
 from app.db.session import SessionLocal
 from app.repositories.users import UsersRepo
 from app.bot.keyboards.common import (
@@ -19,6 +19,7 @@ from app.bot.keyboards.common import (
     admin_submission_review_keyboard,
     track_keyboard,
     evaluation_keyboard,
+    start_session_keyboard,
 )
 
 router = Router()
@@ -62,7 +63,12 @@ class EvaluationFlow(StatesGroup):
 
 
 class SchedulingFlow(StatesGroup):
-    waiting_datetime = State()
+    waiting_time_options = State()
+
+
+class SessionClosureFlow(StatesGroup):
+    waiting_score = State()
+    waiting_comment = State()
 
 
 @router.message(CommandStart())
@@ -363,7 +369,7 @@ async def pass_pick_candidate(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    await state.set_state(SchedulingFlow.waiting_datetime)
+    await state.set_state(SchedulingFlow.waiting_time_options)
     await state.update_data(track=track, interviewer_id=int(interviewer_id))
 
     await callback.message.answer(
@@ -392,7 +398,7 @@ async def pass_random_candidate(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    await state.set_state(SchedulingFlow.waiting_datetime)
+    await state.set_state(SchedulingFlow.waiting_time_options)
     await state.update_data(track=track, interviewer_id=int(interviewer_id))
 
     await callback.message.answer(
@@ -402,14 +408,22 @@ async def pass_random_candidate(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.message(SchedulingFlow.waiting_datetime)
+@router.message(SchedulingFlow.waiting_time_options)
 async def schedule_after_match(message: Message, state: FSMContext):
     raw = (message.text or "").strip()
-    try:
-        starts_at = datetime.strptime(raw, "%Y-%m-%d %H:%M")
-    except ValueError:
-        await message.answer("Формат неверный. Используй YYYY-MM-DD HH:MM, пример: 2026-02-24 19:30")
+    options_raw = [x.strip() for x in raw.replace(";", ",").split(",") if x.strip()]
+    if not options_raw:
+        await message.answer("Пришли 1-3 вариантов времени через запятую в формате YYYY-MM-DD HH:MM")
         return
+
+    options = []
+    for item in options_raw[:3]:
+        try:
+            dt = datetime.strptime(item, "%Y-%m-%d %H:%M")
+            options.append(dt)
+        except ValueError:
+            await message.answer(f"Неверный формат времени: {item}. Используй YYYY-MM-DD HH:MM")
+            return
 
     data = await state.get_data()
     track = data.get("track")
@@ -422,48 +436,102 @@ async def schedule_after_match(message: Message, state: FSMContext):
     async with SessionLocal() as session:
         student = (await session.execute(select(User).where(User.tg_user_id == message.from_user.id))).scalar_one_or_none()
         interviewer = (await session.execute(select(User).where(User.id == interviewer_id))).scalar_one_or_none()
-
         if not student or not interviewer:
             await state.clear()
-            await message.answer("Не удалось создать собес, попробуй ещё раз.")
+            await message.answer("Не удалось создать запрос на собес, попробуй ещё раз.")
             return
 
-        # берем любой одобренный набор интервьюера по треку (самый свежий)
         set_item = (
             await session.execute(
                 select(CandidateSet)
-                .where(
-                    CandidateSet.owner_user_id == interviewer.id,
-                    CandidateSet.track_code == track,
-                    CandidateSet.status == "approved",
-                )
+                .where(CandidateSet.owner_user_id == interviewer.id, CandidateSet.track_code == track, CandidateSet.status == "approved")
                 .order_by(CandidateSet.updated_at.desc())
                 .limit(1)
             )
         ).scalar_one_or_none()
-
         if not set_item:
             await state.clear()
             await message.answer("У интервьюера не найден подходящий набор. Запусти подбор ещё раз.")
             return
 
+        proposal = InterviewProposal(
+            student_id=student.id,
+            interviewer_id=interviewer.id,
+            track_code=track,
+            pack_id=set_item.id,
+            options_json={"options": [d.strftime("%Y-%m-%d %H:%M") for d in options]},
+            status="pending",
+        )
+        session.add(proposal)
+        await session.commit()
+        await session.refresh(proposal)
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    for d in options:
+        label = d.strftime("%Y-%m-%d %H:%M")
+        kb.button(text=label, callback_data=f"proposal_pick:{proposal.id}:{label}")
+    kb.adjust(1)
+
+    await state.clear()
+    await message.answer("Отправил варианты времени интервьюеру. Жди подтверждение ✅")
+
+    try:
+        await message.bot.send_message(
+            interviewer.tg_user_id,
+            "Новый запрос на собес 📩\n"
+            f"Кандидат: @{message.from_user.username or 'no_username'}\n"
+            f"Тема: {TRACK_LABELS.get(track, track)}\n"
+            "Выбери итоговое время:",
+            reply_markup=kb.as_markup(),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("proposal_pick:"))
+async def proposal_pick_time(callback: CallbackQuery):
+    _, proposal_id, picked_str = callback.data.split(":", 2)
+    try:
+        starts_at = datetime.strptime(picked_str, "%Y-%m-%d %H:%M")
+    except ValueError:
+        await callback.answer("Некорректное время", show_alert=True)
+        return
+
+    async with SessionLocal() as session:
+        proposal = (await session.execute(select(InterviewProposal).where(InterviewProposal.id == int(proposal_id)))).scalar_one_or_none()
+        if not proposal or proposal.status != "pending":
+            await callback.answer("Заявка уже обработана", show_alert=True)
+            return
+
+        interviewer = (await session.execute(select(User).where(User.id == proposal.interviewer_id))).scalar_one_or_none()
+        student = (await session.execute(select(User).where(User.id == proposal.student_id))).scalar_one_or_none()
+        if not interviewer or not student:
+            await callback.answer("Пользователь не найден", show_alert=True)
+            return
+
+        if callback.from_user.id != interviewer.tg_user_id:
+            await callback.answer("Это не твоя заявка", show_alert=True)
+            return
+
         ends_at = starts_at + timedelta(minutes=settings.DEFAULT_DURATION_MIN)
+        telemost_url = f"{settings.TELEMOST_URL.rstrip('/')}/{proposal.id}"
+
         session_row = Session(
             interviewer_id=interviewer.id,
             student_id=student.id,
-            track_code=track,
-            pack_id=set_item.id,
+            track_code=proposal.track_code,
+            pack_id=proposal.pack_id,
             starts_at=starts_at,
             ends_at=ends_at,
-            meeting_url=f"https://t.me/{(message.bot.username or 'mock')}",
+            meeting_url=telemost_url,
             status="scheduled",
         )
         session.add(session_row)
+        proposal.status = "accepted"
 
         a, b = sorted((student.id, interviewer.id))
-        pair = (
-            await session.execute(select(PairStats).where(PairStats.user_a_id == a, PairStats.user_b_id == b))
-        ).scalar_one_or_none()
+        pair = (await session.execute(select(PairStats).where(PairStats.user_a_id == a, PairStats.user_b_id == b))).scalar_one_or_none()
         if not pair:
             pair = PairStats(user_a_id=a, user_b_id=b, interviews_count=0)
             session.add(pair)
@@ -471,29 +539,149 @@ async def schedule_after_match(message: Message, state: FSMContext):
         pair.last_interview_at = datetime.utcnow()
 
         await session.commit()
+        await session.refresh(session_row)
 
-    await state.clear()
+    await callback.message.answer(f"Время подтверждено: {picked_str} ✅")
+    await callback.answer()
 
-    await message.answer(
-        "Собес назначен ✅\n"
-        f"Тема: {TRACK_LABELS.get(track, track)}\n"
-        f"Когда: {starts_at.strftime('%Y-%m-%d %H:%M')} (Мск)\n"
-        f"Ссылка: https://t.me/{(message.bot.username or 'mock')}"
+    for tg_id, role in [(student.tg_user_id, "candidate"), (interviewer.tg_user_id, "interviewer")]:
+        try:
+            await callback.bot.send_message(
+                tg_id,
+                "Собес назначен ✅\n"
+                f"Тема: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}\n"
+                f"Когда: {picked_str} (Мск)\n"
+                "За 15 минут напомню и дам кнопку «Пройти собес»."
+            )
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data.startswith("session:start:"))
+async def session_start(callback: CallbackQuery, state: FSMContext):
+    session_id = int(callback.data.split(":")[-1])
+
+    async with SessionLocal() as session:
+        s = (await session.execute(select(Session).where(Session.id == session_id))).scalar_one_or_none()
+        if not s:
+            await callback.answer("Собес не найден", show_alert=True)
+            return
+        me = (await session.execute(select(User).where(User.tg_user_id == callback.from_user.id))).scalar_one_or_none()
+        if not me or me.id not in {s.student_id, s.interviewer_id}:
+            await callback.answer("Это не твой собес", show_alert=True)
+            return
+
+    role = "candidate" if me.id == s.student_id else "interviewer"
+    await state.set_state(SessionClosureFlow.waiting_score)
+    await state.update_data(session_id=session_id, role=role)
+
+    await callback.message.answer(
+        f"Ссылка на telemost: {s.meeting_url}\n\n"
+        "После собеса заполни форму: поставь оценку 0-3"
     )
+    await callback.answer()
 
+
+@router.message(SessionClosureFlow.waiting_score)
+async def session_review_score(message: Message, state: FSMContext):
     try:
-        await message.bot.send_message(
-            interviewer.tg_user_id,
-            "Тебе назначен собес ✅\n"
-            f"Кандидат: @{message.from_user.username or 'no_username'}\n"
-            f"Тема: {TRACK_LABELS.get(track, track)}\n"
-            f"Когда: {starts_at.strftime('%Y-%m-%d %H:%M')} (Мск)\n\n"
-            "Ниже вопросы из твоего набора:\n"
-            f"{set_item.questions_text}",
-            reply_markup=evaluation_keyboard(set_item.id),
-        )
-    except Exception:
-        pass
+        score = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("Оценка должна быть числом 0-3")
+        return
+    if score < 0 or score > 3:
+        await message.answer("Оценка должна быть в диапазоне 0-3")
+        return
+
+    await state.update_data(score=score)
+    await state.set_state(SessionClosureFlow.waiting_comment)
+    await message.answer("Добавь короткий фидбек по собесу")
+
+
+@router.message(SessionClosureFlow.waiting_comment)
+async def session_review_comment(message: Message, state: FSMContext):
+    comment = (message.text or "").strip()
+    if not comment:
+        await message.answer("Комментарий не может быть пустым")
+        return
+
+    data = await state.get_data()
+    session_id = data.get("session_id")
+    role = data.get("role")
+    score = data.get("score")
+
+    async with SessionLocal() as session:
+        s = (await session.execute(select(Session).where(Session.id == session_id))).scalar_one_or_none()
+        me = (await session.execute(select(User).where(User.tg_user_id == message.from_user.id))).scalar_one_or_none()
+        if not s or not me:
+            await state.clear()
+            await message.answer("Собес не найден")
+            return
+
+        target_id = s.interviewer_id if me.id == s.student_id else s.student_id
+
+        existing = (
+            await session.execute(
+                select(SessionReview).where(SessionReview.session_id == session_id, SessionReview.author_user_id == me.id)
+            )
+        ).scalar_one_or_none()
+        if existing:
+            existing.score = score
+            existing.comment = comment
+        else:
+            session.add(
+                SessionReview(
+                    session_id=session_id,
+                    author_user_id=me.id,
+                    target_user_id=target_id,
+                    author_role=role,
+                    score=score,
+                    comment=comment,
+                )
+            )
+
+        reviews = (
+            await session.execute(select(SessionReview).where(SessionReview.session_id == session_id))
+        ).scalars().all()
+
+        await session.commit()
+
+        await state.clear()
+        await message.answer("Фидбек сохранен ✅")
+
+        if len(reviews) >= 2:
+            s.status = "completed"
+            await session.commit()
+
+            users = {
+                u.id: u
+                for u in (
+                    await session.execute(select(User).where(User.id.in_([s.student_id, s.interviewer_id])))
+                ).scalars().all()
+            }
+
+            cand_review = next((r for r in reviews if r.author_user_id == s.student_id), None)
+            int_review = next((r for r in reviews if r.author_user_id == s.interviewer_id), None)
+
+            if cand_review and int_review:
+                try:
+                    await message.bot.send_message(users[s.interviewer_id].tg_user_id, f"Фидбек кандидата:\nОценка: {cand_review.score}\n{cand_review.comment}")
+                    await message.bot.send_message(users[s.student_id].tg_user_id, f"Фидбек интервьюера:\nОценка: {int_review.score}\n{int_review.comment}")
+                except Exception:
+                    pass
+
+            for admin_id in settings.admin_ids:
+                try:
+                    await message.bot.send_message(
+                        admin_id,
+                        "Собес закрыт ✅\n"
+                        f"session_id={session_id}\n"
+                        f"Тема: {TRACK_LABELS.get(s.track_code, s.track_code)}\n"
+                        f"Кандидат фидбек: {cand_review.score if cand_review else 'n/a'} / {cand_review.comment if cand_review else 'n/a'}\n"
+                        f"Интервьюер фидбек: {int_review.score if int_review else 'n/a'} / {int_review.comment if int_review else 'n/a'}",
+                    )
+                except Exception:
+                    pass
 
 
 @router.callback_query(F.data == "menu:find_student")

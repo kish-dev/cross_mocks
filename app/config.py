@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     APP_TZ: str = "Europe/Moscow"
     MEETING_PROVIDER: str = "manual"
     DEFAULT_DURATION_MIN: int = 60
+    TELEMOST_URL: str = "https://telemost.yandex.ru/"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

@@ -1,13 +1,57 @@
 import asyncio
 import logging
+from datetime import datetime, timedelta
+
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.redis import RedisStorage
 from redis.asyncio import Redis
+from sqlalchemy import select
 
 from app.config import settings
 from app.bot.middlewares.access import AccessMiddleware
 from app.bot.routers import start
-from app.db.session import init_db
+from app.bot.keyboards.common import start_session_keyboard
+from app.db.session import init_db, SessionLocal
+from app.db.models import Session, User
+
+
+async def reminder_worker(bot: Bot):
+    while True:
+        try:
+            now = datetime.utcnow()
+            border = now + timedelta(minutes=15)
+            async with SessionLocal() as session:
+                rows = (
+                    await session.execute(
+                        select(Session).where(
+                            Session.status == "scheduled",
+                            Session.reminder_sent.is_(False),
+                            Session.starts_at <= border,
+                            Session.starts_at >= now - timedelta(minutes=1),
+                        )
+                    )
+                ).scalars().all()
+
+                for s in rows:
+                    users = (
+                        await session.execute(select(User).where(User.id.in_([s.student_id, s.interviewer_id])))
+                    ).scalars().all()
+                    for u in users:
+                        try:
+                            await bot.send_message(
+                                u.tg_user_id,
+                                "⏰ Напоминание: через 15 минут у вас собес.\n"
+                                f"Время: {s.starts_at.strftime('%Y-%m-%d %H:%M')} (Мск)",
+                                reply_markup=start_session_keyboard(s.id),
+                            )
+                        except Exception:
+                            pass
+                    s.reminder_sent = True
+                await session.commit()
+        except Exception:
+            pass
+
+        await asyncio.sleep(60)
 
 
 async def main() -> None:
@@ -23,6 +67,8 @@ async def main() -> None:
     dp.callback_query.middleware(AccessMiddleware())
 
     dp.include_router(start.router)
+
+    asyncio.create_task(reminder_worker(bot))
 
     await dp.start_polling(bot)
 

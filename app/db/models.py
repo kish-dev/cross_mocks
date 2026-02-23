@@ -61,6 +61,31 @@ class Session(Base):
     ends_at: Mapped[datetime] = mapped_column(DateTime)
     meeting_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="scheduled")
+    reminder_sent: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class InterviewProposal(Base):
+    __tablename__ = "interview_proposals"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    student_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    interviewer_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    track_code: Mapped[str] = mapped_column(String(32))
+    pack_id: Mapped[int] = mapped_column(ForeignKey("candidate_sets.id"))
+    options_json: Mapped[dict] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class SessionReview(Base):
+    __tablename__ = "session_reviews"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("sessions.id"), index=True)
+    author_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    target_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    author_role: Mapped[str] = mapped_column(String(32))  # candidate/interviewer
+    score: Mapped[int] = mapped_column(Integer)  # 0-3
+    comment: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
