@@ -6,13 +6,15 @@ from aiogram.types import Message, CallbackQuery
 from sqlalchemy import select, func
 
 from app.config import settings
-from app.db.models import User, Session, SessionFeedback, PackSubmission
+from app.db.models import User, Session, SessionFeedback, CandidateSet, QuickEvaluation
 from app.db.session import SessionLocal
 from app.repositories.users import UsersRepo
 from app.bot.keyboards.common import (
     main_menu_keyboard,
     admin_role_keyboard,
     admin_submission_review_keyboard,
+    track_keyboard,
+    evaluation_keyboard,
 )
 
 router = Router()
@@ -32,10 +34,18 @@ class AdminStatsFlow(StatesGroup):
 
 
 class SubmissionFlow(StatesGroup):
-    waiting_content = State()
+    waiting_track = State()
+    waiting_title = State()
+    waiting_questions = State()
 
 
 class AdminSubmissionFlow(StatesGroup):
+    waiting_comment = State()
+
+
+class EvaluationFlow(StatesGroup):
+    waiting_candidate_username = State()
+    waiting_score = State()
     waiting_comment = State()
 
 
@@ -56,22 +66,41 @@ async def start_cmd(message: Message):
 
 @router.callback_query(F.data == "menu:submit_pack")
 async def submit_pack_entry(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(SubmissionFlow.waiting_content)
-    await callback.message.answer(
-        "Пришли ОДНИМ сообщением текст или ссылку на свой набор вопросов для мок-собеса.\n"
-        "Я отправлю это админу на проверку."
-    )
+    await state.set_state(SubmissionFlow.waiting_track)
+    await callback.message.answer("Выбери тип собеса для набора:", reply_markup=track_keyboard("submit_track"))
     await callback.answer()
 
 
-@router.message(SubmissionFlow.waiting_content)
+@router.callback_query(F.data.startswith("submit_track:"))
+async def submit_track_pick(callback: CallbackQuery, state: FSMContext):
+    track = callback.data.split(":", 1)[1]
+    await state.update_data(track=track)
+    await state.set_state(SubmissionFlow.waiting_title)
+    await callback.message.answer("Ок. Теперь пришли название этого набора (например: 'Теория #1 Android Core').")
+    await callback.answer()
+
+
+@router.message(SubmissionFlow.waiting_title)
+async def submit_title(message: Message, state: FSMContext):
+    title = (message.text or "").strip()
+    if not title:
+        await message.answer("Название не может быть пустым.")
+        return
+    await state.update_data(title=title)
+    await state.set_state(SubmissionFlow.waiting_questions)
+    await message.answer("Теперь пришли ОДНИМ сообщением вопросы (или ссылку на них).")
+
+
+@router.message(SubmissionFlow.waiting_questions)
 async def submit_pack_content(message: Message, state: FSMContext):
-    content_text = (message.text or message.caption or "").strip()
-    if not content_text:
+    questions_text = (message.text or message.caption or "").strip()
+    if not questions_text:
         await message.answer("Нужно отправить текст или ссылку одним сообщением.")
         return
 
-    source_link = content_text if content_text.startswith("http") else None
+    data = await state.get_data()
+    track = data.get("track")
+    title = data.get("title")
 
     async with SessionLocal() as session:
         db_user = await UsersRepo().upsert(
@@ -80,15 +109,16 @@ async def submit_pack_content(message: Message, state: FSMContext):
             username=message.from_user.username,
             full_name=message.from_user.full_name,
         )
-        submission = PackSubmission(
-            student_user_id=db_user.id,
-            content_text=content_text,
-            source_message_link=source_link,
+        set_item = CandidateSet(
+            owner_user_id=db_user.id,
+            track_code=track,
+            title=title,
+            questions_text=questions_text,
             status="pending",
         )
-        session.add(submission)
+        session.add(set_item)
         await session.commit()
-        await session.refresh(submission)
+        await session.refresh(set_item)
 
     for admin_id in settings.admin_ids:
         try:
@@ -96,15 +126,17 @@ async def submit_pack_content(message: Message, state: FSMContext):
                 admin_id,
                 "Вам на проверку прилетели вопросы для собеса.\n\n"
                 f"От: @{message.from_user.username or 'no_username'} (id={message.from_user.id})\n"
-                f"submission_id={submission.id}\n\n"
-                f"Содержимое:\n{content_text}",
-                reply_markup=admin_submission_review_keyboard(submission.id),
+                f"Тип: {track}\n"
+                f"Набор: {title}\n"
+                f"set_id={set_item.id}\n\n"
+                f"Вопросы:\n{questions_text}",
+                reply_markup=admin_submission_review_keyboard(set_item.id),
             )
         except Exception:
             pass
 
     await state.clear()
-    await message.answer("Отправил на проверку админу ✅")
+    await message.answer("Отправил набор на проверку админу ✅")
 
 
 @router.callback_query(F.data == "menu:find_interviewer")
@@ -118,9 +150,9 @@ async def find_interviewer(callback: CallbackQuery):
 
         approved_count = (
             await session.execute(
-                select(func.count(PackSubmission.id)).where(
-                    PackSubmission.student_user_id == db_user.id,
-                    PackSubmission.status == "approved",
+                select(func.count(CandidateSet.id)).where(
+                    CandidateSet.owner_user_id == db_user.id,
+                    CandidateSet.status == "approved",
                 )
             )
         ).scalar_one()
@@ -133,14 +165,126 @@ async def find_interviewer(callback: CallbackQuery):
         await callback.answer()
         return
 
-    await callback.message.answer("Ок, поиск интервьюера. Следующий шаг: выбери трек (FSM в разработке).")
+    await callback.message.answer("Ок, ты можешь проходить собес. Подбор пары/расписания сейчас в следующем шаге разработки.")
     await callback.answer()
 
 
 @router.callback_query(F.data == "menu:find_student")
 async def find_student(callback: CallbackQuery):
-    await callback.message.answer("Ок, поиск ученика. Следующий шаг: выбери трек (FSM в разработке).")
+    await callback.message.answer("Выбери трек собеса:", reply_markup=track_keyboard("conduct_track"))
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("conduct_track:"))
+async def conduct_track(callback: CallbackQuery):
+    track = callback.data.split(":", 1)[1]
+
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(CandidateSet.id, CandidateSet.title)
+                .where(CandidateSet.track_code == track, CandidateSet.status == "approved")
+                .order_by(CandidateSet.created_at.desc())
+                .limit(20)
+            )
+        ).all()
+
+    if not rows:
+        await callback.message.answer("Пока нет одобренных наборов по этому треку.")
+        await callback.answer()
+        return
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    kb = InlineKeyboardBuilder()
+    for set_id, title in rows:
+        kb.button(text=title[:60], callback_data=f"conduct_set:{set_id}")
+    kb.adjust(1)
+
+    await callback.message.answer("Выбери набор вопросов:", reply_markup=kb.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("conduct_set:"))
+async def conduct_set(callback: CallbackQuery):
+    set_id = int(callback.data.split(":", 1)[1])
+
+    async with SessionLocal() as session:
+        set_item = (await session.execute(select(CandidateSet).where(CandidateSet.id == set_id))).scalar_one_or_none()
+
+    if not set_item:
+        await callback.message.answer("Набор не найден.")
+        await callback.answer()
+        return
+
+    await callback.message.answer(
+        f"Набор: {set_item.title}\n"
+        f"Трек: {set_item.track_code}\n\n"
+        "Вопросы для интервьюера:\n"
+        f"{set_item.questions_text}",
+        reply_markup=evaluation_keyboard(set_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("eval:start:"))
+async def eval_start(callback: CallbackQuery, state: FSMContext):
+    set_id = int(callback.data.split(":")[-1])
+    await state.update_data(set_id=set_id)
+    await state.set_state(EvaluationFlow.waiting_candidate_username)
+    await callback.message.answer("Введи username кандидата в формате @username")
+    await callback.answer()
+
+
+@router.message(EvaluationFlow.waiting_candidate_username)
+async def eval_username(message: Message, state: FSMContext):
+    username = (message.text or "").strip().lstrip("@").lower()
+    if not username:
+        await message.answer("Нужен @username")
+        return
+    await state.update_data(candidate_username=username)
+    await state.set_state(EvaluationFlow.waiting_score)
+    await message.answer("Поставь оценку кандидату от 1 до 10")
+
+
+@router.message(EvaluationFlow.waiting_score)
+async def eval_score(message: Message, state: FSMContext):
+    try:
+        score = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("Оценка должна быть числом 1-10")
+        return
+
+    if score < 1 or score > 10:
+        await message.answer("Оценка должна быть в диапазоне 1-10")
+        return
+
+    await state.update_data(score=score)
+    await state.set_state(EvaluationFlow.waiting_comment)
+    await message.answer("Добавь краткий комментарий по кандидату")
+
+
+@router.message(EvaluationFlow.waiting_comment)
+async def eval_comment(message: Message, state: FSMContext):
+    comment = (message.text or "").strip()
+    if not comment:
+        await message.answer("Комментарий не может быть пустым")
+        return
+
+    data = await state.get_data()
+    async with SessionLocal() as session:
+        item = QuickEvaluation(
+            interviewer_tg_user_id=message.from_user.id,
+            candidate_username=data["candidate_username"],
+            set_id=data.get("set_id"),
+            score=data["score"],
+            comment=comment,
+        )
+        session.add(item)
+        await session.commit()
+
+    await state.clear()
+    await message.answer("Форма оценки сохранена ✅")
 
 
 @router.callback_query(F.data == "menu:my_stats")
@@ -270,7 +414,7 @@ async def admin_stats_role(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("submission:approve:"))
+@router.callback_query(F.data.startswith("set_submission:approve:"))
 async def admin_submission_approve(callback: CallbackQuery):
     if callback.from_user.id not in settings.admin_ids:
         await callback.answer("Только для админа", show_alert=True)
@@ -280,7 +424,7 @@ async def admin_submission_approve(callback: CallbackQuery):
 
     async with SessionLocal() as session:
         submission = (
-            await session.execute(select(PackSubmission).where(PackSubmission.id == submission_id))
+            await session.execute(select(CandidateSet).where(CandidateSet.id == submission_id))
         ).scalar_one_or_none()
         if not submission:
             await callback.answer("Заявка не найдена", show_alert=True)
@@ -291,20 +435,20 @@ async def admin_submission_approve(callback: CallbackQuery):
         await session.commit()
 
         student = (
-            await session.execute(select(User).where(User.id == submission.student_user_id))
+            await session.execute(select(User).where(User.id == submission.owner_user_id))
         ).scalar_one_or_none()
 
     if student:
         await callback.bot.send_message(
             student.tg_user_id,
-            "Твой набор для мок-собеса принят ✅\nТеперь можешь идти в flow «Хочу пройти собес»."
+            f"Твой набор '{submission.title}' ({submission.track_code}) принят ✅"
         )
 
-    await callback.message.answer(f"submission_id={submission_id} принят ✅")
+    await callback.message.answer(f"set_id={submission_id} принят ✅")
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("submission:changes:"))
+@router.callback_query(F.data.startswith("set_submission:changes:"))
 async def admin_submission_changes(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id not in settings.admin_ids:
         await callback.answer("Только для админа", show_alert=True)
@@ -314,8 +458,8 @@ async def admin_submission_changes(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminSubmissionFlow.waiting_comment)
     await state.update_data(submission_id=submission_id)
     await callback.message.answer(
-        f"Введи текст правок для submission_id={submission_id}.\n"
-        "Я отправлю это ученику и оставлю статус «проверка идет» (changes_requested)."
+        f"Введи текст правок для set_id={submission_id}.\n"
+        "Статус останется на проверке (changes_requested)."
     )
     await callback.answer()
 
@@ -340,7 +484,7 @@ async def admin_submission_comment(message: Message, state: FSMContext):
 
     async with SessionLocal() as session:
         submission = (
-            await session.execute(select(PackSubmission).where(PackSubmission.id == submission_id))
+            await session.execute(select(CandidateSet).where(CandidateSet.id == submission_id))
         ).scalar_one_or_none()
         if not submission:
             await state.clear()
@@ -352,7 +496,7 @@ async def admin_submission_comment(message: Message, state: FSMContext):
         await session.commit()
 
         student = (
-            await session.execute(select(User).where(User.id == submission.student_user_id))
+            await session.execute(select(User).where(User.id == submission.owner_user_id))
         ).scalar_one_or_none()
 
     if student:
@@ -364,4 +508,4 @@ async def admin_submission_comment(message: Message, state: FSMContext):
         )
 
     await state.clear()
-    await message.answer(f"Отправил правки ученику по submission_id={submission_id}.")
+    await message.answer(f"Отправил правки ученику по set_id={submission_id}.")

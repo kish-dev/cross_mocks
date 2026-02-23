@@ -24,7 +24,24 @@ def admin_role_keyboard() -> InlineKeyboardMarkup:
 
 def admin_submission_review_keyboard(submission_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Принять", callback_data=f"submission:approve:{submission_id}")
-    kb.button(text="✏️ Нужны правки", callback_data=f"submission:changes:{submission_id}")
+    kb.button(text="✅ Принять", callback_data=f"set_submission:approve:{submission_id}")
+    kb.button(text="✏️ Нужны правки", callback_data=f"set_submission:changes:{submission_id}")
     kb.adjust(2)
+    return kb.as_markup()
+
+
+def track_keyboard(prefix: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Теория", callback_data=f"{prefix}:theory")
+    kb.button(text="Систем-дизайн", callback_data=f"{prefix}:sysdesign")
+    kb.button(text="Лайвкодинг", callback_data=f"{prefix}:livecoding")
+    kb.button(text="Финал", callback_data=f"{prefix}:final")
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def evaluation_keyboard(set_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🧾 Заполнить форму оценки", callback_data=f"eval:start:{set_id}")
+    kb.adjust(1)
     return kb.as_markup()

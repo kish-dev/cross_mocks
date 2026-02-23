@@ -93,7 +93,31 @@ class PackSubmission(Base):
     student_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     content_text: Mapped[str] = mapped_column(Text)
     source_message_link: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending")  # legacy
+    admin_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CandidateSet(Base):
+    __tablename__ = "candidate_sets"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    track_code: Mapped[str] = mapped_column(String(32), index=True)  # theory/sysdesign/livecoding/final
+    title: Mapped[str] = mapped_column(String(255))
+    questions_text: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default="pending")  # pending/changes_requested/approved
     admin_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class QuickEvaluation(Base):
+    __tablename__ = "quick_evaluations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    interviewer_tg_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    candidate_username: Mapped[str] = mapped_column(String(255))
+    set_id: Mapped[int | None] = mapped_column(ForeignKey("candidate_sets.id"), nullable=True)
+    score: Mapped[int] = mapped_column(Integer)
+    comment: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
