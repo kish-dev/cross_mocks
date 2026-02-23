@@ -45,7 +45,7 @@ class AdminSubmissionFlow(StatesGroup):
 
 class EvaluationFlow(StatesGroup):
     waiting_candidate_username = State()
-    waiting_score = State()
+    waiting_scores = State()
     waiting_comment = State()
 
 
@@ -230,7 +230,16 @@ async def conduct_set(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("eval:start:"))
 async def eval_start(callback: CallbackQuery, state: FSMContext):
     set_id = int(callback.data.split(":")[-1])
-    await state.update_data(set_id=set_id)
+
+    async with SessionLocal() as session:
+        set_item = (await session.execute(select(CandidateSet).where(CandidateSet.id == set_id))).scalar_one_or_none()
+
+    if not set_item:
+        await callback.message.answer("Набор не найден")
+        await callback.answer()
+        return
+
+    await state.update_data(set_id=set_id, track_code=set_item.track_code)
     await state.set_state(EvaluationFlow.waiting_candidate_username)
     await callback.message.answer("Введи username кандидата в формате @username")
     await callback.answer()
@@ -242,26 +251,89 @@ async def eval_username(message: Message, state: FSMContext):
     if not username:
         await message.answer("Нужен @username")
         return
+
+    data = await state.get_data()
+    track = data.get("track_code")
+
+    if track == "theory":
+        hint = (
+            "Шкала 0-3. Пришли 3 числа через пробел:\n"
+            "1) понимание темы\n2) применение на практике\n3) защита ответа\n"
+            "Пример: 2 1 2\n"
+            "Важно: без примера из опыта максимум 2."
+        )
+    elif track == "livecoding":
+        hint = (
+            "Шкала 0-3. Пришли 3 числа через пробел:\n"
+            "1) старт решения\n2) рабочесть решения\n3) проговаривание хода мыслей\n"
+            "Пример: 2 2 1"
+        )
+    elif track == "sysdesign":
+        hint = (
+            "Шкала 0-3. Пришли 4 значения:\n"
+            "1) структура\n2) аргументация компромиссов\n3) целостность\n4) задавал ли уточняющие вопросы (yes/no)\n"
+            "Пример: 2 2 1 yes\n"
+            "Если без уточняющих вопросов — минус 1 к итогу."
+        )
+    else:  # final
+        hint = (
+            "Финалка (новая шкала 0-3). Пришли 2 числа:\n"
+            "1) как рассказал о себе (структура/уверенность)\n"
+            "2) глубина пояснений по опыту\n"
+            "Пример: 2 3"
+        )
+
     await state.update_data(candidate_username=username)
-    await state.set_state(EvaluationFlow.waiting_score)
-    await message.answer("Поставь оценку кандидату от 1 до 10")
+    await state.set_state(EvaluationFlow.waiting_scores)
+    await message.answer(hint)
 
 
-@router.message(EvaluationFlow.waiting_score)
-async def eval_score(message: Message, state: FSMContext):
+@router.message(EvaluationFlow.waiting_scores)
+async def eval_scores(message: Message, state: FSMContext):
+    raw = (message.text or "").strip().lower()
+    data = await state.get_data()
+    track = data.get("track_code")
+
+    parts = raw.replace(",", " ").split()
+
     try:
-        score = int((message.text or "").strip())
+        if track in {"theory", "livecoding"}:
+            if len(parts) != 3:
+                raise ValueError
+            nums = [int(x) for x in parts]
+            if any(x < 0 or x > 3 for x in nums):
+                raise ValueError
+            final_avg = sum(nums) / 3
+            rubric = f"scores={nums}"
+        elif track == "sysdesign":
+            if len(parts) != 4:
+                raise ValueError
+            nums = [int(x) for x in parts[:3]]
+            if any(x < 0 or x > 3 for x in nums):
+                raise ValueError
+            asked = parts[3] in {"yes", "y", "да"}
+            final_avg = sum(nums) / 3
+            if not asked:
+                final_avg = max(0.0, final_avg - 1.0)
+            rubric = f"scores={nums}, asked_clarifying={asked}"
+        else:  # final
+            if len(parts) != 2:
+                raise ValueError
+            nums = [int(x) for x in parts]
+            if any(x < 0 or x > 3 for x in nums):
+                raise ValueError
+            final_avg = sum(nums) / 2
+            rubric = f"self_intro={nums[0]}, depth={nums[1]}"
     except ValueError:
-        await message.answer("Оценка должна быть числом 1-10")
+        await message.answer("Неверный формат. Пришли значения строго по шаблону из прошлого сообщения.")
         return
 
-    if score < 1 or score > 10:
-        await message.answer("Оценка должна быть в диапазоне 1-10")
-        return
-
-    await state.update_data(score=score)
+    await state.update_data(final_avg=round(final_avg, 2), rubric=rubric)
     await state.set_state(EvaluationFlow.waiting_comment)
-    await message.answer("Добавь краткий комментарий по кандидату")
+    await message.answer(
+        "Добавь краткий комментарий по кандидату.\n"
+        "Правило честности: если сомневаешься между 1 и 2 — ставь 1."
+    )
 
 
 @router.message(EvaluationFlow.waiting_comment)
@@ -272,19 +344,32 @@ async def eval_comment(message: Message, state: FSMContext):
         return
 
     data = await state.get_data()
+    avg = float(data["final_avg"])
+
+    if avg >= 2.5:
+        verdict = "готов к рынку"
+    elif avg >= 2.0:
+        verdict = "стоит немного доработать ответы"
+    else:
+        verdict = "рано, продолжаем подготовку"
+
     async with SessionLocal() as session:
         item = QuickEvaluation(
             interviewer_tg_user_id=message.from_user.id,
             candidate_username=data["candidate_username"],
             set_id=data.get("set_id"),
-            score=data["score"],
-            comment=comment,
+            score=int(round(avg * 100)),  # храним средний балл * 100
+            comment=f"avg={avg}; verdict={verdict}; rubric={data.get('rubric')}; note={comment}",
         )
         session.add(item)
         await session.commit()
 
     await state.clear()
-    await message.answer("Форма оценки сохранена ✅")
+    await message.answer(
+        "Форма оценки сохранена ✅\n"
+        f"Средний балл: {avg}\n"
+        f"Итог: {verdict}"
+    )
 
 
 @router.callback_query(F.data == "menu:my_stats")
