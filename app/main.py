@@ -16,11 +16,14 @@ from app.db.models import Session, User
 
 
 async def reminder_worker(bot: Bot):
+    start_nudged: set[int] = set()
+
     while True:
         try:
             now = datetime.utcnow()
             border = now + timedelta(minutes=15)
             async with SessionLocal() as session:
+                # T-15 reminder
                 rows = (
                     await session.execute(
                         select(Session).where(
@@ -47,6 +50,41 @@ async def reminder_worker(bot: Bot):
                         except Exception:
                             pass
                     s.reminder_sent = True
+
+                # Start-time nudge if session wasn't started via button yet
+                overdue = (
+                    await session.execute(
+                        select(Session).where(
+                            Session.status == "scheduled",
+                            Session.starts_at <= now,
+                        )
+                    )
+                ).scalars().all()
+
+                for s in overdue:
+                    if s.id in start_nudged:
+                        continue
+                    users = (
+                        await session.execute(select(User).where(User.id.in_([s.student_id, s.interviewer_id])))
+                    ).scalars().all()
+                    for u in users:
+                        try:
+                            await bot.send_message(
+                                u.tg_user_id,
+                                "🚨 Время собеса уже наступило, но старт ещё не подтвержден.\n"
+                                "Нажмите кнопку ниже, чтобы начать.",
+                                reply_markup=start_session_keyboard(s.id),
+                            )
+                        except Exception:
+                            pass
+                    start_nudged.add(s.id)
+
+                # cleanup memory set when session moved out of scheduled
+                active_scheduled_ids = set(
+                    (await session.execute(select(Session.id).where(Session.status == "scheduled"))).scalars().all()
+                )
+                start_nudged.intersection_update(active_scheduled_ids)
+
                 await session.commit()
         except Exception:
             pass

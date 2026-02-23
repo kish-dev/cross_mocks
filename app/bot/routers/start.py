@@ -782,6 +782,7 @@ async def session_start_now(callback: CallbackQuery):
         s.meeting_url = new_link
         s.starts_at = datetime.utcnow()
         s.ends_at = s.starts_at + timedelta(minutes=settings.DEFAULT_DURATION_MIN)
+        s.status = "in_progress"
         await session.commit()
 
         student = (await session.execute(select(User).where(User.id == s.student_id))).scalar_one_or_none()
@@ -815,6 +816,13 @@ async def session_start(callback: CallbackQuery, state: FSMContext):
         if not me or me.id not in {s.student_id, s.interviewer_id}:
             await callback.answer("Это не твой собес", show_alert=True)
             return
+
+    # mark session as started when at least one participant pressed start
+    async with SessionLocal() as session:
+        s2 = (await session.execute(select(Session).where(Session.id == session_id))).scalar_one_or_none()
+        if s2 and s2.status == "scheduled":
+            s2.status = "in_progress"
+            await session.commit()
 
     role = "candidate" if me.id == s.student_id else "interviewer"
     await state.set_state(SessionClosureFlow.waiting_score)
