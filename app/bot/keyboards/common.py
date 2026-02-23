@@ -33,7 +33,7 @@ def admin_submission_review_keyboard(submission_id: int) -> InlineKeyboardMarkup
 def track_keyboard(prefix: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="Теория", callback_data=f"{prefix}:theory")
-    kb.button(text="Систем-дизайн", callback_data=f"{prefix}:sysdesign")
+    kb.button(text="System-design", callback_data=f"{prefix}:sysdesign")
     kb.button(text="Лайвкодинг", callback_data=f"{prefix}:livecoding")
     kb.button(text="Финал", callback_data=f"{prefix}:final")
     kb.adjust(2)

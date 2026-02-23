@@ -21,6 +21,13 @@ from app.bot.keyboards.common import (
 
 router = Router()
 
+TRACK_LABELS = {
+    "theory": "theory",
+    "sysdesign": "system-design",
+    "livecoding": "livecoding",
+    "final": "final",
+}
+
 WELCOME = (
     "Привет! Я бот для парных мок-собеседований.\n\n"
     "Что я делаю:\n"
@@ -129,7 +136,7 @@ async def submit_pack_content(message: Message, state: FSMContext):
                 admin_id,
                 "Вам на проверку прилетели вопросы для собеса.\n\n"
                 f"От: @{message.from_user.username or 'no_username'} (id={message.from_user.id})\n"
-                f"Тип: {track}\n"
+                f"Тип: {TRACK_LABELS.get(track, track)}\n"
                 f"Набор: {title}\n"
                 f"set_id={set_item.id}\n\n"
                 f"Вопросы:\n{questions_text}",
@@ -149,7 +156,7 @@ async def resubmit_via_reply(message: Message, state: FSMContext):
     if current_state is not None:
         return
 
-    reply_text = (message.reply_to_message.text or "")
+    reply_text = ((message.reply_to_message.text or "") + "\n" + (message.reply_to_message.caption or "")).strip()
     m = re.search(r"set_id=(\d+)", reply_text)
     if not m:
         return
@@ -182,20 +189,26 @@ async def resubmit_via_reply(message: Message, state: FSMContext):
         set_item.admin_comment = None
         await session.commit()
 
+    delivered = 0
     for admin_id in settings.admin_ids:
         try:
             await message.bot.send_message(
                 admin_id,
                 "Повторная отправка набора после правок 📌\n\n"
                 f"От: @{message.from_user.username or 'no_username'} (id={message.from_user.id})\n"
-                f"Тип: {set_item.track_code}\n"
+                f"Тип: {TRACK_LABELS.get(set_item.track_code, set_item.track_code)}\n"
                 f"Набор: {set_item.title}\n"
                 f"set_id={set_item.id}\n\n"
                 f"Обновлённые вопросы:\n{content}",
                 reply_markup=admin_submission_review_keyboard(set_item.id),
             )
+            delivered += 1
         except Exception:
-            pass
+            continue
+
+    if delivered == 0:
+        await message.answer("Не удалось доставить админу. Проверь ADMIN_TG_IDS в .env")
+        return
 
     await message.answer("Исправления отправлены админу на повторную проверку ✅")
 
@@ -280,7 +293,7 @@ async def conduct_set(callback: CallbackQuery):
 
     await callback.message.answer(
         f"Набор: {set_item.title}\n"
-        f"Трек: {set_item.track_code}\n\n"
+        f"Трек: {TRACK_LABELS.get(set_item.track_code, set_item.track_code)}\n\n"
         "Вопросы для интервьюера:\n"
         f"{set_item.questions_text}",
         reply_markup=evaluation_keyboard(set_id),
@@ -476,7 +489,7 @@ async def eval_comment(message: Message, state: FSMContext):
             await message.bot.send_message(
                 candidate_tg_user_id,
                 "По тебе заполнена оценка собеседования 📌\n"
-                f"Трек: {track_code}\n"
+                f"Трек: {TRACK_LABELS.get(track_code, track_code)}\n"
                 f"Средний балл: {avg}\n"
                 f"Итог: {verdict}\n"
                 f"Комментарий: {comment}",
@@ -492,7 +505,7 @@ async def eval_comment(message: Message, state: FSMContext):
                 "Новая оценка собеседования ✅\n"
                 f"Интервьюер: @{message.from_user.username or 'no_username'} (id={message.from_user.id})\n"
                 f"Кандидат: @{candidate_username}\n"
-                f"Трек: {track_code}\n"
+                f"Трек: {TRACK_LABELS.get(track_code, track_code)}\n"
                 f"Средний балл: {avg}\n"
                 f"Итог: {verdict}\n"
                 f"Рубрика: {data.get('rubric')}\n"
@@ -696,7 +709,7 @@ async def admin_submission_approve(callback: CallbackQuery):
     if student:
         await callback.bot.send_message(
             student.tg_user_id,
-            f"Твой набор '{submission.title}' ({submission.track_code}) принят ✅"
+            f"Твой набор '{submission.title}' ({TRACK_LABELS.get(submission.track_code, submission.track_code)}) принят ✅"
         )
 
     await callback.message.answer(f"set_id={submission_id} принят ✅")
