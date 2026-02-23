@@ -1,0 +1,25 @@
+version: '3.9'
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tgmocks
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+
+  bot:
+    build: .
+    env_file: .env
+    depends_on:
+      - db
+      - redis
+    restart: unless-stopped
+    command: python -m app.main
+
+volumes:
+  db_data:

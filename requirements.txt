@@ -1,0 +1,11 @@
+aiogram==3.20.0
+SQLAlchemy==2.0.38
+asyncpg==0.30.0
+alembic==1.14.1
+redis==5.2.1
+pydantic==2.10.6
+pydantic-settings==2.7.1
+python-dotenv==1.0.1
+python-json-logger==2.0.7
+pytest==8.3.4
+pytest-asyncio==0.25.3
