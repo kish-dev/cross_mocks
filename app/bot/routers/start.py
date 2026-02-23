@@ -152,14 +152,13 @@ async def submit_pack_content(message: Message, state: FSMContext):
 @router.message(F.reply_to_message)
 async def resubmit_via_reply(message: Message, state: FSMContext):
     # one-click flow: user replies to admin changes message with updated set content
-    current_state = await state.get_state()
-    if current_state is not None:
-        return
-
     reply_text = ((message.reply_to_message.text or "") + "\n" + (message.reply_to_message.caption or "")).strip()
     m = re.search(r"set_id=(\d+)", reply_text)
     if not m:
         return
+
+    # cancel any stale FSM state so reply-based resubmission always works
+    await state.clear()
 
     content = (message.text or message.caption or "").strip()
     if not content:
