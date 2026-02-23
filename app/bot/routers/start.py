@@ -444,12 +444,15 @@ async def schedule_after_match(message: Message, state: FSMContext):
             await message.answer("У интервьюера не найден подходящий набор. Запусти подбор ещё раз.")
             return
 
+        # try to extract exact datetime slots from free-form text: YYYY-MM-DD HH:MM
+        parsed_slots = re.findall(r"\b\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\b", request_text)
+
         proposal = InterviewProposal(
             student_id=student.id,
             interviewer_id=interviewer.id,
             track_code=track,
             pack_id=set_item.id,
-            options_json={"request": request_text},
+            options_json={"request": request_text, "parsed_slots": parsed_slots[:5]},
             status="pending",
         )
         session.add(proposal)
@@ -458,6 +461,8 @@ async def schedule_after_match(message: Message, state: FSMContext):
 
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     kb = InlineKeyboardBuilder()
+    for idx, slot in enumerate((proposal.options_json or {}).get("parsed_slots", [])):
+        kb.button(text=f"✅ {slot}", callback_data=f"proposal:offer:{proposal.id}:{idx}")
     kb.button(text="🕒 Предложить итоговый слот", callback_data=f"proposal:propose:{proposal.id}")
     kb.adjust(1)
 
@@ -480,6 +485,52 @@ async def schedule_after_match(message: Message, state: FSMContext):
 
 class ProposalFlow(StatesGroup):
     waiting_final_time = State()
+
+
+@router.callback_query(F.data.startswith("proposal:offer:"))
+async def proposal_offer_preparsed(callback: CallbackQuery):
+    _, _, proposal_id, idx = callback.data.split(":", 3)
+    async with SessionLocal() as session:
+        proposal = (await session.execute(select(InterviewProposal).where(InterviewProposal.id == int(proposal_id)))).scalar_one_or_none()
+        interviewer = (await session.execute(select(User).where(User.id == proposal.interviewer_id))).scalar_one_or_none() if proposal else None
+        student = (await session.execute(select(User).where(User.id == proposal.student_id))).scalar_one_or_none() if proposal else None
+
+        if not proposal or not interviewer or not student:
+            await callback.answer("Заявка не найдена", show_alert=True)
+            return
+        if callback.from_user.id != interviewer.tg_user_id:
+            await callback.answer("Это не твоя заявка", show_alert=True)
+            return
+
+        slots = (proposal.options_json or {}).get("parsed_slots", [])
+        i = int(idx)
+        if i < 0 or i >= len(slots):
+            await callback.answer("Слот не найден", show_alert=True)
+            return
+
+        picked = slots[i]
+        proposal.options_json = {**(proposal.options_json or {}), "final_time": picked}
+        await session.commit()
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Слот кайф, подтверждаю", callback_data=f"proposal:confirm:{proposal_id}")
+    kb.button(text="❌ Не подходит", callback_data=f"proposal:reject:{proposal_id}")
+    kb.adjust(1)
+
+    await callback.message.answer("Слот отправлен кандидату на подтверждение ✅")
+    await callback.answer()
+
+    try:
+        await callback.bot.send_message(
+            student.tg_user_id,
+            "Интервьюер предложил итоговое время:\n"
+            f"{picked} (Мск)\n"
+            "Подтверди слот:",
+            reply_markup=kb.as_markup(),
+        )
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data.startswith("proposal:propose:"))
@@ -537,7 +588,7 @@ async def proposal_receive_final_time(message: Message, state: FSMContext):
 
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Слот кайф, подтверждаю", callback_data=f"proposal:confirm:{proposal_id}:{raw}")
+    kb.button(text="✅ Слот кайф, подтверждаю", callback_data=f"proposal:confirm:{proposal_id}")
     kb.button(text="❌ Не подходит", callback_data=f"proposal:reject:{proposal_id}")
     kb.adjust(1)
 
@@ -591,15 +642,19 @@ async def proposal_reject(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("proposal:confirm:"))
 async def proposal_confirm(callback: CallbackQuery):
-    _, _, proposal_id, picked_str = callback.data.split(":", 3)
-    try:
-        starts_at = datetime.strptime(picked_str, "%Y-%m-%d %H:%M")
-    except ValueError:
-        await callback.answer("Некорректное время", show_alert=True)
-        return
+    proposal_id = int(callback.data.split(":")[-1])
 
     async with SessionLocal() as session:
         proposal = (await session.execute(select(InterviewProposal).where(InterviewProposal.id == int(proposal_id)))).scalar_one_or_none()
+        picked_str = ((proposal.options_json or {}).get("final_time") if proposal else None)
+        if not picked_str:
+            await callback.answer("Слот не выбран", show_alert=True)
+            return
+        try:
+            starts_at = datetime.strptime(picked_str, "%Y-%m-%d %H:%M")
+        except ValueError:
+            await callback.answer("Некорректное время", show_alert=True)
+            return
         if not proposal or proposal.status != "pending":
             await callback.answer("Заявка уже обработана", show_alert=True)
             return
