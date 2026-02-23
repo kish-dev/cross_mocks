@@ -1,5 +1,6 @@
 import re
 import random
+from urllib.parse import urlencode
 from datetime import datetime, timedelta
 
 from aiogram import Router, F
@@ -31,6 +32,18 @@ TRACK_LABELS = {
     "livecoding": "livecoding",
     "final": "final",
 }
+
+
+def to_gcal_link(title: str, details: str, start_dt: datetime, end_dt: datetime) -> str:
+    fmt = "%Y%m%dT%H%M%SZ"
+    params = {
+        "action": "TEMPLATE",
+        "text": title,
+        "details": details,
+        "dates": f"{start_dt.strftime(fmt)}/{end_dt.strftime(fmt)}",
+    }
+    return f"https://calendar.google.com/calendar/render?{urlencode(params)}"
+
 
 WELCOME = (
     "Привет! Я бот для парных мок-собеседований.\n\n"
@@ -708,17 +721,42 @@ async def proposal_confirm(callback: CallbackQuery):
     await callback.message.answer(f"Слот подтвержден: {picked_str} ✅")
     await callback.answer()
 
-    for tg_id in [student.tg_user_id, interviewer.tg_user_id]:
-        try:
-            await callback.bot.send_message(
-                tg_id,
-                "Собес назначен ✅\n"
-                f"Тема: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}\n"
-                f"Когда: {picked_str} (Мск)\n"
-                "За 15 минут напомню и дам кнопку «Пройти собес»."
-            )
-        except Exception:
-            pass
+    details = f"Собес по теме {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}. Telemost: {session_row.meeting_url}"
+    gcal = to_gcal_link(
+        title=f"Mock interview: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}",
+        details=details,
+        start_dt=starts_at,
+        end_dt=ends_at,
+    )
+
+    try:
+        await callback.bot.send_message(
+            student.tg_user_id,
+            "Собес назначен ✅\n"
+            f"Тема: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}\n"
+            f"Когда: {picked_str} (Мск)\n"
+            f"Добавить в календарь: {gcal}\n"
+            "За 15 минут напомню и дам кнопку «Пройти собес»."
+        )
+    except Exception:
+        pass
+
+    try:
+        # interviewer also receives questions for this interview
+        async with SessionLocal() as session2:
+            set_item2 = (await session2.execute(select(CandidateSet).where(CandidateSet.id == session_row.pack_id))).scalar_one_or_none()
+        await callback.bot.send_message(
+            interviewer.tg_user_id,
+            "Собес назначен ✅\n"
+            f"Тема: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}\n"
+            f"Когда: {picked_str} (Мск)\n"
+            f"Добавить в календарь: {gcal}\n\n"
+            "Вопросы для собеса:\n"
+            f"{set_item2.questions_text if set_item2 else 'n/a'}\n\n"
+            "За 15 минут напомню и дам кнопку «Пройти собес»."
+        )
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data.startswith("session:start_now:"))
@@ -1181,6 +1219,47 @@ async def eval_comment(message: Message, state: FSMContext):
         f"Итог: {verdict}"
         f"{delivery_note}"
     )
+
+
+@router.callback_query(F.data == "menu:upcoming")
+async def upcoming_sessions(callback: CallbackQuery):
+    now = datetime.utcnow()
+    async with SessionLocal() as session:
+        me = (await session.execute(select(User).where(User.tg_user_id == callback.from_user.id))).scalar_one_or_none()
+        if not me:
+            await callback.message.answer("Сначала нажми /start")
+            await callback.answer()
+            return
+
+        rows = (
+            await session.execute(
+                select(Session, CandidateSet.title, User.username)
+                .join(CandidateSet, CandidateSet.id == Session.pack_id, isouter=True)
+                .join(User, User.id == Session.student_id, isouter=True)
+                .where(
+                    Session.status == "scheduled",
+                    Session.starts_at >= now,
+                    ((Session.student_id == me.id) | (Session.interviewer_id == me.id)),
+                )
+                .order_by(Session.starts_at.asc())
+                .limit(10)
+            )
+        ).all()
+
+    if not rows:
+        await callback.message.answer("Предстоящих собесов пока нет.")
+        await callback.answer()
+        return
+
+    lines = []
+    for s, set_title, student_username in rows:
+        role = "собеседующий" if s.interviewer_id == me.id else "собеседуемый"
+        lines.append(
+            f"• {s.starts_at.strftime('%Y-%m-%d %H:%M')} | {TRACK_LABELS.get(s.track_code, s.track_code)} | {role} | набор: {set_title or 'n/a'}"
+        )
+
+    await callback.message.answer("Предстоящие собесы:\n" + "\n".join(lines))
+    await callback.answer()
 
 
 @router.callback_query(F.data == "menu:my_stats")

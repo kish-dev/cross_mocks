@@ -7,6 +7,7 @@ def main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     kb.button(text="📝 Отправить свой набор на проверку", callback_data="menu:submit_pack")
     kb.button(text="🎯 Хочу пройти собес", callback_data="menu:find_interviewer")
     kb.button(text="🧑‍🏫 Хочу провести собес", callback_data="menu:find_student")
+    kb.button(text="📅 Предстоящие собесы", callback_data="menu:upcoming")
     kb.button(text="📊 Моя статистика", callback_data="menu:my_stats")
     if is_admin:
         kb.button(text="🛠 Админ: статистика по ученику", callback_data="menu:admin_stats")
