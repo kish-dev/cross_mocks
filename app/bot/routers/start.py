@@ -1,4 +1,5 @@
 import re
+from datetime import datetime, timedelta
 
 from aiogram import Router, F
 from aiogram.filters import CommandStart
@@ -8,7 +9,7 @@ from aiogram.types import Message, CallbackQuery
 from sqlalchemy import select, func
 
 from app.config import settings
-from app.db.models import User, Session, SessionFeedback, CandidateSet, QuickEvaluation
+from app.db.models import User, Session, SessionFeedback, CandidateSet, QuickEvaluation, PairStats
 from app.db.session import SessionLocal
 from app.repositories.users import UsersRepo
 from app.bot.keyboards.common import (
@@ -57,6 +58,10 @@ class EvaluationFlow(StatesGroup):
     waiting_candidate_username = State()
     waiting_scores = State()
     waiting_comment = State()
+
+
+class SchedulingFlow(StatesGroup):
+    waiting_datetime = State()
 
 
 @router.message(CommandStart())
@@ -243,7 +248,7 @@ async def find_interviewer(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("pass_track:"))
-async def pass_track(callback: CallbackQuery):
+async def pass_track(callback: CallbackQuery, state: FSMContext):
     track = callback.data.split(":", 1)[1]
 
     async with SessionLocal() as session:
@@ -271,11 +276,156 @@ async def pass_track(callback: CallbackQuery):
         await callback.answer()
         return
 
+    async with SessionLocal() as session:
+        # кандидаты-интервьюеры: есть approved набор по треку, не сам пользователь
+        candidates = (
+            await session.execute(
+                select(User.id)
+                .join(CandidateSet, CandidateSet.owner_user_id == User.id)
+                .where(
+                    User.id != db_user.id,
+                    User.is_active.is_(True),
+                    CandidateSet.status == "approved",
+                    CandidateSet.track_code == track,
+                )
+                .group_by(User.id)
+            )
+        ).scalars().all()
+
+        if not candidates:
+            await callback.message.answer("Пока нет доступных интервьюеров по этой теме. Попробуй позже.")
+            await callback.answer()
+            return
+
+        # приоритет: с кем собес был максимально давно (или никогда)
+        now = datetime.utcnow()
+        best_id = None
+        best_score = None
+        for candidate_id in candidates:
+            a, b = sorted((db_user.id, candidate_id))
+            pair = (
+                await session.execute(
+                    select(PairStats).where(PairStats.user_a_id == a, PairStats.user_b_id == b)
+                )
+            ).scalar_one_or_none()
+
+            if not pair or not pair.last_interview_at:
+                score = float("inf")
+            else:
+                score = (now - pair.last_interview_at).total_seconds()
+
+            if best_score is None or score > best_score:
+                best_score = score
+                best_id = candidate_id
+
+        interviewer = (await session.execute(select(User).where(User.id == best_id))).scalar_one_or_none()
+        if not interviewer:
+            await callback.message.answer("Не удалось подобрать интервьюера, попробуй ещё раз.")
+            await callback.answer()
+            return
+
+    await state.set_state(SchedulingFlow.waiting_datetime)
+    await state.update_data(track=track, interviewer_id=interviewer.id)
+
     await callback.message.answer(
-        f"Отлично, по теме {TRACK_LABELS.get(track, track)} ты можешь проходить собес у другого участника ✅\n"
-        "Подбор пары/расписания подключим следующим шагом."
+        f"Нашёл интервьюера: @{interviewer.username or 'no_username'} ✅\n"
+        "Пришли удобное время в формате YYYY-MM-DD HH:MM (Мск), например: 2026-02-24 19:30"
     )
     await callback.answer()
+
+
+@router.message(SchedulingFlow.waiting_datetime)
+async def schedule_after_match(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    try:
+        starts_at = datetime.strptime(raw, "%Y-%m-%d %H:%M")
+    except ValueError:
+        await message.answer("Формат неверный. Используй YYYY-MM-DD HH:MM, пример: 2026-02-24 19:30")
+        return
+
+    data = await state.get_data()
+    track = data.get("track")
+    interviewer_id = data.get("interviewer_id")
+    if not track or not interviewer_id:
+        await state.clear()
+        await message.answer("Сессия подбора потерялась. Нажми «Хочу пройти собес» ещё раз.")
+        return
+
+    async with SessionLocal() as session:
+        student = (await session.execute(select(User).where(User.tg_user_id == message.from_user.id))).scalar_one_or_none()
+        interviewer = (await session.execute(select(User).where(User.id == interviewer_id))).scalar_one_or_none()
+
+        if not student or not interviewer:
+            await state.clear()
+            await message.answer("Не удалось создать собес, попробуй ещё раз.")
+            return
+
+        # берем любой одобренный набор интервьюера по треку (самый свежий)
+        set_item = (
+            await session.execute(
+                select(CandidateSet)
+                .where(
+                    CandidateSet.owner_user_id == interviewer.id,
+                    CandidateSet.track_code == track,
+                    CandidateSet.status == "approved",
+                )
+                .order_by(CandidateSet.updated_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+        if not set_item:
+            await state.clear()
+            await message.answer("У интервьюера не найден подходящий набор. Запусти подбор ещё раз.")
+            return
+
+        ends_at = starts_at + timedelta(minutes=settings.DEFAULT_DURATION_MIN)
+        session_row = Session(
+            interviewer_id=interviewer.id,
+            student_id=student.id,
+            track_code=track,
+            pack_id=set_item.id,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            meeting_url=f"https://t.me/{(message.bot.username or 'mock')}",
+            status="scheduled",
+        )
+        session.add(session_row)
+
+        a, b = sorted((student.id, interviewer.id))
+        pair = (
+            await session.execute(select(PairStats).where(PairStats.user_a_id == a, PairStats.user_b_id == b))
+        ).scalar_one_or_none()
+        if not pair:
+            pair = PairStats(user_a_id=a, user_b_id=b, interviews_count=0)
+            session.add(pair)
+        pair.interviews_count += 1
+        pair.last_interview_at = datetime.utcnow()
+
+        await session.commit()
+
+    await state.clear()
+
+    await message.answer(
+        "Собес назначен ✅\n"
+        f"Тема: {TRACK_LABELS.get(track, track)}\n"
+        f"Когда: {starts_at.strftime('%Y-%m-%d %H:%M')} (Мск)\n"
+        f"Ссылка: https://t.me/{(message.bot.username or 'mock')}"
+    )
+
+    try:
+        await message.bot.send_message(
+            interviewer.tg_user_id,
+            "Тебе назначен собес ✅\n"
+            f"Кандидат: @{message.from_user.username or 'no_username'}\n"
+            f"Тема: {TRACK_LABELS.get(track, track)}\n"
+            f"Когда: {starts_at.strftime('%Y-%m-%d %H:%M')} (Мск)\n\n"
+            "Ниже вопросы из твоего набора:\n"
+            f"{set_item.questions_text}",
+            reply_markup=evaluation_keyboard(set_item.id),
+        )
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data == "menu:find_student")
