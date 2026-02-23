@@ -11,8 +11,11 @@ from app.config import settings
 from app.bot.middlewares.access import AccessMiddleware
 from app.bot.routers import start
 from app.bot.keyboards.common import start_session_keyboard
-from app.db.session import init_db, SessionLocal
+from app.db.session import SessionLocal
 from app.db.models import Session, User
+
+
+logger = logging.getLogger("tgmocks.reminder")
 
 
 async def reminder_worker(bot: Bot):
@@ -44,11 +47,12 @@ async def reminder_worker(bot: Bot):
                             await bot.send_message(
                                 u.tg_user_id,
                                 "⏰ Напоминание: через 15 минут у вас собес.\n"
-                                f"Время: {s.starts_at.strftime('%Y-%m-%d %H:%M')} (Мск)",
+                                f"Время: {s.starts_at.strftime('%Y-%m-%d %H:%M')} MSK",
                                 reply_markup=start_session_keyboard(s.id),
                             )
-                        except Exception:
-                            pass
+                            logger.info("sent_t15_reminder session_id=%s tg_user_id=%s", s.id, u.tg_user_id)
+                        except Exception as e:
+                            logger.warning("failed_t15_reminder session_id=%s tg_user_id=%s err=%s", s.id, u.tg_user_id, e)
                     s.reminder_sent = True
 
                 # Start-time nudge if session wasn't started via button yet
@@ -71,12 +75,13 @@ async def reminder_worker(bot: Bot):
                         try:
                             await bot.send_message(
                                 u.tg_user_id,
-                                "🚨 Время собеса уже наступило, но старт ещё не подтвержден.\n"
+                                "🚨 Время собеса (MSK) уже наступило, но старт ещё не подтвержден.\n"
                                 "Нажмите кнопку ниже, чтобы начать.",
                                 reply_markup=start_session_keyboard(s.id),
                             )
-                        except Exception:
-                            pass
+                            logger.info("sent_start_nudge session_id=%s tg_user_id=%s", s.id, u.tg_user_id)
+                        except Exception as e:
+                            logger.warning("failed_start_nudge session_id=%s tg_user_id=%s err=%s", s.id, u.tg_user_id, e)
                     start_nudged.add(s.id)
 
                 # cleanup memory set when session moved out of scheduled
@@ -94,8 +99,6 @@ async def reminder_worker(bot: Bot):
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
-
-    await init_db()
 
     bot = Bot(settings.BOT_TOKEN)
     redis = Redis.from_url(settings.REDIS_URL)

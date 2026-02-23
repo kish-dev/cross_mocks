@@ -19,7 +19,7 @@ services:
       - db
       - redis
     restart: unless-stopped
-    command: python -m app.main
+    command: sh -c "alembic stamp 0001_baseline && python -m app.main"
 
 volumes:
   db_data:

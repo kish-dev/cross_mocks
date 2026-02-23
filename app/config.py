@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     MEETING_PROVIDER: str = "manual"
     DEFAULT_DURATION_MIN: int = 60
     TELEMOST_URL: str = "https://telemost.yandex.ru/"
+    GOOGLE_SHEET_ID: str = ""
+    GOOGLE_SHEETS_CREDENTIALS_JSON: str = ""
+    SHEETS_OUTBOX_PATH: str = "backups/sheets_outbox.jsonl"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

@@ -40,10 +40,27 @@ MVP Telegram-бота для парных мок-собеседований.
 
 Рекомендация: VPS + Docker Compose + `restart: unless-stopped`.
 
-## Следующий этап (по ТЗ)
-- FSM: выбор трека/пака
-- Алгоритм матчинга по "максимально давно не собеседовались"
-- Планирование времени + генерация meeting-ссылки
-- Интеграция календаря
-- Двусторонний фидбек + анонимная аналитика
-- Полная админ-аналитика
+## Миграции и данные
+- Используется Alembic baseline: `0001_baseline`
+- При старте контейнера бот делает `alembic stamp 0001_baseline` и запускается без удаления данных.
+
+## Backup / Restore
+- Сделать бэкап:
+  ```bash
+  ./scripts/backup_db.sh
+  ```
+- Восстановить бэкап:
+  ```bash
+  ./scripts/restore_db.sh backups/backup_YYYYmmdd_HHMMSS.sql
+  ```
+
+## Тесты
+Запуск в отдельном одноразовом контейнере:
+```bash
+docker-compose run --rm bot pytest -q
+```
+
+## Google Sheets
+Если нет реальных credentials/sheet id, работает mock sink:
+- события пишутся в `backups/sheets_outbox.jsonl`
+- формат и точки вызова готовы для подключения реального Sheets API.

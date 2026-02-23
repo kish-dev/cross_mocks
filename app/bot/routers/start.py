@@ -23,6 +23,7 @@ from app.bot.keyboards.common import (
     start_session_keyboard,
 )
 from app.services.scheduling import extract_datetime_slots, can_confirm_slot
+from app.services.sheets_sink import sheets_sink
 
 router = Router()
 
@@ -396,7 +397,7 @@ async def pass_pick_candidate(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.answer(
         f"Выбран интервьюер: @{interviewer.username or 'no_username'} ✅\n"
-        "Пришли удобное время в формате YYYY-MM-DD HH:MM (Мск), например: 2026-02-24 19:30"
+        "Пришли удобное время в формате YYYY-MM-DD HH:MM MSK, например: 2026-02-24 19:30"
     )
     await callback.answer()
 
@@ -425,7 +426,7 @@ async def pass_random_candidate(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.answer(
         f"Случайный выбор: @{interviewer.username or 'no_username'} 🎲\n"
-        "Пришли удобное время в формате YYYY-MM-DD HH:MM (Мск), например: 2026-02-24 19:30"
+        "Пришли удобное время в формате YYYY-MM-DD HH:MM MSK, например: 2026-02-24 19:30"
     )
     await callback.answer()
 
@@ -547,7 +548,7 @@ async def proposal_offer_preparsed(callback: CallbackQuery):
         await callback.bot.send_message(
             student.tg_user_id,
             "Интервьюер предложил итоговое время:\n"
-            f"{picked} (Мск)\n"
+            f"{picked} MSK\n"
             "Подтверди слот:",
             reply_markup=kb.as_markup(),
         )
@@ -571,7 +572,7 @@ async def proposal_start_propose(callback: CallbackQuery, state: FSMContext):
 
     await state.set_state(ProposalFlow.waiting_final_time)
     await state.update_data(proposal_id=proposal_id)
-    await callback.message.answer("Введи итоговое время в формате YYYY-MM-DD HH:MM (Мск)")
+    await callback.message.answer("Введи итоговое время в формате YYYY-MM-DD HH:MM MSK")
     await callback.answer()
 
 
@@ -621,7 +622,7 @@ async def proposal_receive_final_time(message: Message, state: FSMContext):
         await message.bot.send_message(
             student.tg_user_id,
             "Интервьюер предложил итоговое время:\n"
-            f"{raw} (Мск)\n"
+            f"{raw} MSK\n"
             "Подтверди слот:",
             reply_markup=kb.as_markup(),
         )
@@ -718,6 +719,20 @@ async def proposal_confirm(callback: CallbackQuery):
         await session.commit()
         await session.refresh(session_row)
 
+    sheets_sink.send(
+        "session_scheduled",
+        {
+            "session_id": session_row.id,
+            "track": session_row.track_code,
+            "starts_at": starts_at.isoformat(),
+            "ends_at": ends_at.isoformat(),
+            "student_tg_user_id": student.tg_user_id,
+            "interviewer_tg_user_id": interviewer.tg_user_id,
+            "meeting_url": session_row.meeting_url,
+            "timezone": "MSK",
+        },
+    )
+
     await callback.message.answer(f"Слот подтвержден: {picked_str} ✅")
     await callback.answer()
 
@@ -734,7 +749,7 @@ async def proposal_confirm(callback: CallbackQuery):
             student.tg_user_id,
             "Собес назначен ✅\n"
             f"Тема: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}\n"
-            f"Когда: {picked_str} (Мск)\n"
+            f"Когда: {picked_str} MSK\n"
             f"Добавить в календарь: {gcal}\n"
             "Можно запустить сразу кнопкой ниже, даже если до старта < 15 минут.",
             reply_markup=start_session_keyboard(session_row.id),
@@ -750,7 +765,7 @@ async def proposal_confirm(callback: CallbackQuery):
             interviewer.tg_user_id,
             "Собес назначен ✅\n"
             f"Тема: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}\n"
-            f"Когда: {picked_str} (Мск)\n"
+            f"Когда: {picked_str} MSK\n"
             f"Добавить в календарь: {gcal}\n\n"
             "Вопросы для собеса:\n"
             f"{set_item2.questions_text if set_item2 else 'n/a'}\n\n"
@@ -922,6 +937,23 @@ async def session_review_comment(message: Message, state: FSMContext):
                     await message.bot.send_message(users[s.student_id].tg_user_id, f"Фидбек интервьюера:\nОценка: {int_review.score}\n{int_review.comment}")
                 except Exception:
                     pass
+
+            sheets_sink.send(
+                "session_completed",
+                {
+                    "session_id": session_id,
+                    "track": s.track_code,
+                    "candidate_feedback": {
+                        "score": cand_review.score if cand_review else None,
+                        "comment": cand_review.comment if cand_review else None,
+                    },
+                    "interviewer_feedback": {
+                        "score": int_review.score if int_review else None,
+                        "comment": int_review.comment if int_review else None,
+                    },
+                    "timezone": "MSK",
+                },
+            )
 
             for admin_id in settings.admin_ids:
                 try:
@@ -1231,19 +1263,19 @@ async def eval_comment(message: Message, state: FSMContext):
     )
 
 
-@router.callback_query(F.data == "menu:upcoming")
-async def upcoming_sessions(callback: CallbackQuery):
+async def _render_upcoming_page(target_message, tg_user_id: int, page: int = 0):
     now = datetime.utcnow()
+    page_size = 5
+
     async with SessionLocal() as session:
-        me = (await session.execute(select(User).where(User.tg_user_id == callback.from_user.id))).scalar_one_or_none()
+        me = (await session.execute(select(User).where(User.tg_user_id == tg_user_id))).scalar_one_or_none()
         if not me:
-            await callback.message.answer("Сначала нажми /start")
-            await callback.answer()
+            await target_message.answer("Сначала нажми /start")
             return
 
         rows = (
             await session.execute(
-                select(Session, CandidateSet.title, User.username)
+                select(Session, CandidateSet.title, User.username, User.tg_user_id)
                 .join(CandidateSet, CandidateSet.id == Session.pack_id, isouter=True)
                 .join(User, User.id == Session.student_id, isouter=True)
                 .where(
@@ -1252,23 +1284,108 @@ async def upcoming_sessions(callback: CallbackQuery):
                     ((Session.student_id == me.id) | (Session.interviewer_id == me.id)),
                 )
                 .order_by(Session.starts_at.asc())
-                .limit(10)
             )
         ).all()
 
-    if not rows:
-        await callback.message.answer("Предстоящих собесов пока нет.")
-        await callback.answer()
-        return
+        if not rows:
+            await target_message.answer("Предстоящих собесов пока нет.")
+            return
 
-    lines = []
-    for s, set_title, student_username in rows:
-        role = "собеседующий" if s.interviewer_id == me.id else "собеседуемый"
-        lines.append(
-            f"• {s.starts_at.strftime('%Y-%m-%d %H:%M')} | {TRACK_LABELS.get(s.track_code, s.track_code)} | {role} | набор: {set_title or 'n/a'}"
-        )
+        start = page * page_size
+        end = start + page_size
+        chunk = rows[start:end]
 
-    await callback.message.answer("Предстоящие собесы:\n" + "\n".join(lines))
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        kb = InlineKeyboardBuilder()
+
+        lines = [f"Предстоящие собесы (страница {page + 1}) — время в MSK:"]
+        for s, set_title, student_username, student_tg_id in chunk:
+            is_interviewer = s.interviewer_id == me.id
+            role = "собеседующий" if is_interviewer else "собеседуемый"
+
+            # identify peer nickname
+            if is_interviewer:
+                peer_name = f"@{student_username}" if student_username else f"id:{student_tg_id}"
+            else:
+                interviewer = (
+                    await session.execute(select(User).where(User.id == s.interviewer_id))
+                ).scalar_one_or_none()
+                peer_name = f"@{interviewer.username}" if interviewer and interviewer.username else f"id:{interviewer.tg_user_id if interviewer else 'n/a'}"
+
+            title_part = f" | набор: {set_title or 'n/a'}" if is_interviewer else ""
+            lines.append(
+                f"• #{s.id} | {s.starts_at.strftime('%Y-%m-%d %H:%M')} MSK | {TRACK_LABELS.get(s.track_code, s.track_code)} | {role} | второй: {peer_name}{title_part}"
+            )
+
+            # per-session actions
+            gcal = to_gcal_link(
+                title=f"Mock interview: {TRACK_LABELS.get(s.track_code, s.track_code)}",
+                details=f"Session #{s.id}. Telemost: {s.meeting_url}",
+                start_dt=s.starts_at,
+                end_dt=s.ends_at,
+            )
+            kb.button(text=f"📅 Календарь #{s.id}", callback_data=f"upg:cal:{s.id}")
+            kb.button(text=f"🗑 Удалить #{s.id}", callback_data=f"upg:del:{s.id}")
+
+        if page > 0:
+            kb.button(text="⬅️ Назад", callback_data=f"upg:page:{page-1}")
+        if end < len(rows):
+            kb.button(text="Вперёд ➡️", callback_data=f"upg:page:{page+1}")
+        kb.adjust(1)
+
+    await target_message.answer("\n".join(lines), reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data == "menu:upcoming")
+async def upcoming_sessions(callback: CallbackQuery):
+    await _render_upcoming_page(callback.message, callback.from_user.id, page=0)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("upg:page:"))
+async def upcoming_page(callback: CallbackQuery):
+    page = int(callback.data.split(":")[-1])
+    await _render_upcoming_page(callback.message, callback.from_user.id, page=page)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("upg:del:"))
+async def upcoming_delete(callback: CallbackQuery):
+    session_id = int(callback.data.split(":")[-1])
+    async with SessionLocal() as session:
+        me = (await session.execute(select(User).where(User.tg_user_id == callback.from_user.id))).scalar_one_or_none()
+        s = (await session.execute(select(Session).where(Session.id == session_id))).scalar_one_or_none()
+        if not me or not s or me.id not in {s.student_id, s.interviewer_id}:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        if s.status != "scheduled":
+            await callback.answer("Можно удалить только запланированный собес", show_alert=True)
+            return
+        s.status = "cancelled"
+        await session.commit()
+
+    await callback.message.answer(f"Собес #{session_id} удален из расписания ✅")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("upg:cal:"))
+async def upcoming_calendar(callback: CallbackQuery):
+    session_id = int(callback.data.split(":")[-1])
+    async with SessionLocal() as session:
+        me = (await session.execute(select(User).where(User.tg_user_id == callback.from_user.id))).scalar_one_or_none()
+        s = (await session.execute(select(Session).where(Session.id == session_id))).scalar_one_or_none()
+        if not me or not s or me.id not in {s.student_id, s.interviewer_id}:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+
+    gcal = to_gcal_link(
+        title=f"Mock interview: {TRACK_LABELS.get(s.track_code, s.track_code)}",
+        details=f"Session #{s.id}. Telemost: {s.meeting_url}",
+        start_dt=s.starts_at,
+        end_dt=s.ends_at,
+    )
+    ics_stub = f"https://calendar.google.com/calendar/ical/{s.id}.ics"
+    await callback.message.answer(f"Для собеса #{s.id}:\nGoogle Calendar: {gcal}\niCal: {ics_stub}")
     await callback.answer()
 
 
