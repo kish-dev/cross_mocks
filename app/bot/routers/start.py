@@ -790,3 +790,66 @@ async def admin_submission_comment(message: Message, state: FSMContext):
 
     await state.clear()
     await message.answer(f"Отправил правки ученику по set_id={submission_id}.")
+
+
+@router.message()
+async def auto_resubmit_latest_changes(message: Message, state: FSMContext):
+    # if user has pending changes_requested set, any plain message auto-resubmits it to admin
+    if not message.text and not message.caption:
+        return
+    if (message.text or "").startswith("/"):
+        return
+
+    current_state = await state.get_state()
+    if current_state is not None:
+        return
+
+    async with SessionLocal() as session:
+        db_user = (await session.execute(select(User).where(User.tg_user_id == message.from_user.id))).scalar_one_or_none()
+        if not db_user:
+            return
+
+        set_item = (
+            await session.execute(
+                select(CandidateSet)
+                .where(CandidateSet.owner_user_id == db_user.id, CandidateSet.status == "changes_requested")
+                .order_by(CandidateSet.updated_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+        if not set_item:
+            return
+
+        content = (message.text or message.caption or "").strip()
+        if not content:
+            return
+
+        set_item.questions_text = content
+        set_item.status = "pending"
+        set_item.admin_comment = None
+        await session.commit()
+
+    delivered = 0
+    for admin_id in settings.admin_ids:
+        try:
+            await message.bot.send_message(
+                admin_id,
+                "Повторная отправка набора после правок 📌\n\n"
+                f"От: @{message.from_user.username or 'no_username'} (id={message.from_user.id})\n"
+                f"Тип: {TRACK_LABELS.get(set_item.track_code, set_item.track_code)}\n"
+                f"Набор: {set_item.title}\n"
+                f"set_id={set_item.id}\n\n"
+                f"Обновлённые вопросы:\n{content}",
+                reply_markup=admin_submission_review_keyboard(set_item.id),
+            )
+            delivered += 1
+        except Exception:
+            continue
+
+    if delivered > 0:
+        await message.answer("Исправления автоматически отправлены админу на повторную проверку ✅")
+    else:
+        await message.answer("Не удалось доставить админу. Проверь ADMIN_TG_IDS в .env")
+
+
