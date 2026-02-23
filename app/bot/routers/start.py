@@ -38,6 +38,7 @@ class SubmissionFlow(StatesGroup):
     waiting_track = State()
     waiting_title = State()
     waiting_questions = State()
+    waiting_resubmission = State()
 
 
 class AdminSubmissionFlow(StatesGroup):
@@ -139,6 +140,63 @@ async def submit_pack_content(message: Message, state: FSMContext):
 
     await state.clear()
     await message.answer("Отправил набор на проверку админу ✅")
+
+
+@router.callback_query(F.data.startswith("set:resubmit:"))
+async def resubmit_set_entry(callback: CallbackQuery, state: FSMContext):
+    set_id = int(callback.data.split(":")[-1])
+    await state.set_state(SubmissionFlow.waiting_resubmission)
+    await state.update_data(resubmit_set_id=set_id)
+    await callback.message.answer(
+        "Отправь исправленную ссылку/набор ОДНИМ сообщением.\n"
+        "Я отправлю это админу на повторную проверку."
+    )
+    await callback.answer()
+
+
+@router.message(SubmissionFlow.waiting_resubmission)
+async def resubmit_set_content(message: Message, state: FSMContext):
+    content = (message.text or message.caption or "").strip()
+    if not content:
+        await message.answer("Нужно отправить текст или ссылку одним сообщением.")
+        return
+
+    data = await state.get_data()
+    set_id = data.get("resubmit_set_id")
+    if not set_id:
+        await state.clear()
+        await message.answer("Не удалось определить набор. Нажми кнопку из сообщения с правками ещё раз.")
+        return
+
+    async with SessionLocal() as session:
+        set_item = (await session.execute(select(CandidateSet).where(CandidateSet.id == set_id))).scalar_one_or_none()
+        if not set_item:
+            await state.clear()
+            await message.answer("Набор не найден.")
+            return
+
+        set_item.questions_text = content
+        set_item.status = "pending"
+        set_item.admin_comment = None
+        await session.commit()
+
+    for admin_id in settings.admin_ids:
+        try:
+            await message.bot.send_message(
+                admin_id,
+                "Повторная отправка набора после правок 📌\n\n"
+                f"От: @{message.from_user.username or 'no_username'} (id={message.from_user.id})\n"
+                f"Тип: {set_item.track_code}\n"
+                f"Набор: {set_item.title}\n"
+                f"set_id={set_item.id}\n\n"
+                f"Обновлённые вопросы:\n{content}",
+                reply_markup=admin_submission_review_keyboard(set_item.id),
+            )
+        except Exception:
+            pass
+
+    await state.clear()
+    await message.answer("Исправления отправлены админу на повторную проверку ✅")
 
 
 @router.callback_query(F.data == "menu:find_interviewer")
@@ -701,7 +759,7 @@ async def admin_submission_comment(message: Message, state: FSMContext):
             "По твоему набору нужны правки ✏️\n"
             f"Комментарий админа:\n{comment}\n\n"
             "Нажми кнопку ниже и отправь исправленный набор на повторную проверку.",
-            reply_markup=resubmit_after_changes_keyboard(),
+            reply_markup=resubmit_after_changes_keyboard(submission_id),
         )
 
     await state.clear()
