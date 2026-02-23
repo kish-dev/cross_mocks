@@ -239,14 +239,9 @@ async def meeting_link_via_reply(message: Message, state: FSMContext):
     if not m:
         return
 
+    session_id = int(m.group(1))
     content = (message.text or message.caption or "").strip()
     url_match = re.search(r"https?://\S+", content)
-    if not url_match:
-        await message.answer("Пришли ссылку на Telemost (URL), и я отправлю кандидату.")
-        return
-
-    session_id = int(m.group(1))
-    meeting_url = url_match.group(0)
 
     async with SessionLocal() as session:
         me = (await session.execute(select(User).where(User.tg_user_id == message.from_user.id))).scalar_one_or_none()
@@ -254,30 +249,135 @@ async def meeting_link_via_reply(message: Message, state: FSMContext):
         if not me or not s:
             await message.answer("Сессия не найдена.")
             return
-        if me.id != s.interviewer_id:
-            await message.answer("Ссылку может отправить только собеседующий.")
+
+        # 1) Interviewer sends meeting link
+        if url_match and me.id == s.interviewer_id:
+            meeting_url = url_match.group(0)
+            candidate = (await session.execute(select(User).where(User.id == s.student_id))).scalar_one_or_none()
+            s.meeting_url = meeting_url
+            await session.commit()
+
+            await message.answer("Ссылку отправил кандидату ✅")
+            if candidate:
+                try:
+                    await message.bot.send_message(
+                        candidate.tg_user_id,
+                        "Ссылка на созвон от интервьюера:\n"
+                        f"{meeting_url}\n"
+                        f"session_id={session_id}",
+                    )
+                    await message.bot.send_message(
+                        candidate.tg_user_id,
+                        "Как оценить качество собеса и общение:\n"
+                        f"{candidate_feedback_guide()}"
+                    )
+                except Exception:
+                    pass
+
+            try:
+                await message.bot.send_message(
+                    me.tg_user_id,
+                    "Гайд оценки для собеседующего:\n"
+                    f"{interviewer_rubric_text(s.track_code)}"
+                )
+            except Exception:
+                pass
+            return
+
+        # 2) Participant sends feedback by reply with session_id (fallback, no FSM required)
+        if me.id in {s.student_id, s.interviewer_id} and content:
+            target_id = s.interviewer_id if me.id == s.student_id else s.student_id
+            role = "candidate" if me.id == s.student_id else "interviewer"
+            m_score = re.search(r"итог\s*:\s*(\d+)", content.lower())
+            score = int(m_score.group(1)) if m_score else 0
+
+            existing = (
+                await session.execute(
+                    select(SessionReview).where(SessionReview.session_id == session_id, SessionReview.author_user_id == me.id)
+                )
+            ).scalar_one_or_none()
+            if existing:
+                existing.score = score
+                existing.comment = content
+            else:
+                session.add(
+                    SessionReview(
+                        session_id=session_id,
+                        author_user_id=me.id,
+                        target_user_id=target_id,
+                        author_role=role,
+                        score=score,
+                        comment=content,
+                    )
+                )
+            await session.commit()
+            await message.answer("Фидбек сохранен ✅")
+            return
+
+    # if it is reply to session but not valid action
+    if url_match and me and s and me.id != s.interviewer_id:
+        await message.answer("Ссылку на созвон может отправить только собеседующий.")
+
+
+@router.message()
+async def meeting_link_without_reply(message: Message, state: FSMContext):
+    # interviewer can send telemost link without reply; bot routes to candidate of nearest active session
+    current_state = await state.get_state()
+    if current_state is not None:
+        return
+
+    content = (message.text or message.caption or "").strip()
+    if not content:
+        return
+
+    url_match = re.search(r"https?://\S+", content)
+    if not url_match:
+        return
+
+    meeting_url = url_match.group(0)
+
+    async with SessionLocal() as session:
+        me = (await session.execute(select(User).where(User.tg_user_id == message.from_user.id))).scalar_one_or_none()
+        if not me:
+            return
+
+        # nearest upcoming/active session where sender is interviewer
+        s = (
+            await session.execute(
+                select(Session)
+                .where(
+                    Session.interviewer_id == me.id,
+                    Session.status.in_(["scheduled", "in_progress"]),
+                )
+                .order_by(Session.starts_at.asc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if not s:
             return
 
         candidate = (await session.execute(select(User).where(User.id == s.student_id))).scalar_one_or_none()
+        if not candidate:
+            return
+
         s.meeting_url = meeting_url
         await session.commit()
 
-    await message.answer("Ссылку отправил кандидату ✅")
-    if candidate:
-        try:
-            await message.bot.send_message(
-                candidate.tg_user_id,
-                "Ссылка на созвон от интервьюера:\n"
-                f"{meeting_url}\n"
-                f"session_id={session_id}",
-            )
-            await message.bot.send_message(
-                candidate.tg_user_id,
-                "Как оценить качество собеса и общение:\n"
-                f"{candidate_feedback_guide()}"
-            )
-        except Exception:
-            pass
+    await message.answer(f"Ссылку отправил кандидату для session_id={s.id} ✅")
+    try:
+        await message.bot.send_message(
+            candidate.tg_user_id,
+            "Ссылка на созвон от интервьюера:\n"
+            f"{meeting_url}\n"
+            f"session_id={s.id}",
+        )
+        await message.bot.send_message(
+            candidate.tg_user_id,
+            "Как оценить качество собеса и общение:\n"
+            f"{candidate_feedback_guide()}"
+        )
+    except Exception:
+        pass
 
     try:
         await message.bot.send_message(
@@ -978,10 +1078,7 @@ async def session_start(callback: CallbackQuery, state: FSMContext):
         except Exception:
             pass
 
-    await callback.message.answer(
-        "После собеса отправь фидбек свободным текстом.\n"
-        "Рекомендуемый формат первой строки: Итог: <цифра>"
-    )
+    # no extra prompt for candidate here; feedback request happens later in flow
     await callback.answer()
 
 
