@@ -18,6 +18,8 @@ class AccessMiddleware(BaseMiddleware):
                 status = await get_membership_status(data["bot"], settings.PRIVATE_GROUP_ID, event.from_user.id)
                 await event.answer(
                     "Доступ только для участников приватной группы.\n"
+                    "Если хочешь присоединиться к формату моков и менторства:\n"
+                    "https://storm-paneer-5a4.notion.site/Android-2ac8b91c3fe48155b0a0f098f865e092\n\n"
                     f"debug: user_id={event.from_user.id}, group_id={settings.PRIVATE_GROUP_ID}, status={status}"
                 )
             return
