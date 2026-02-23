@@ -25,6 +25,7 @@ from app.bot.keyboards.common import (
 )
 from app.services.scheduling import extract_datetime_slots, can_confirm_slot
 from app.services.sheets_sink import sheets_sink
+from app.services.notifications import build_time_proposal_payload
 
 router = Router()
 
@@ -692,20 +693,25 @@ async def schedule_after_match(message: Message, state: FSMContext):
     kb.adjust(1)
 
     await state.clear()
-    await message.answer("Запрос отправлен интервьюеру ✅")
+
+    payload = build_time_proposal_payload(
+        interviewer_tg_user_id=interviewer.tg_user_id,
+        student_tg_user_id=message.from_user.id,
+        request_text=request_text,
+        track_label=TRACK_LABELS.get(track, track),
+        candidate_username=(message.from_user.username or 'no_username'),
+    )
+
+    await message.answer(payload.student_text)
 
     try:
         await message.bot.send_message(
-            interviewer.tg_user_id,
-            "Новый запрос на собес 📩\n"
-            f"Кандидат: @{message.from_user.username or 'no_username'}\n"
-            f"Тема: {TRACK_LABELS.get(track, track)}\n"
-            f"Пожелания по времени: {request_text}\n\n"
-            "Нажми кнопку и предложи финальный слот в формате YYYY-MM-DD HH:MM",
+            payload.interviewer_tg_user_id,
+            payload.interviewer_text,
             reply_markup=kb.as_markup(),
         )
     except Exception:
-        pass
+        await message.answer("Не удалось отправить запрос интервьюеру. Проверь, что он запускал /start и доступен боту.")
 
 
 class ProposalFlow(StatesGroup):
@@ -829,7 +835,7 @@ async def proposal_receive_final_time(message: Message, state: FSMContext):
             reply_markup=kb.as_markup(),
         )
     except Exception:
-        pass
+        await message.answer("Не удалось отправить слот кандидату. Проверь, что кандидат запускал /start и доступен боту.")
 
 
 @router.callback_query(F.data.startswith("proposal:reject:"))
