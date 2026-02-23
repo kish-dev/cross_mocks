@@ -573,8 +573,18 @@ async def proposal_reject(callback: CallbackQuery):
 
     await callback.answer("Отклонено")
     await callback.message.answer("Ок, слот отклонён. Интервьюер предложит другой.")
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🕒 Предложить другое время", callback_data=f"proposal:propose:{proposal_id}")
+    kb.adjust(1)
+
     try:
-        await callback.bot.send_message(interviewer.tg_user_id, "Кандидат отклонил слот. Предложи другое время через ту же заявку.")
+        await callback.bot.send_message(
+            interviewer.tg_user_id,
+            "Кандидат отклонил слот. Предложи другое время:",
+            reply_markup=kb.as_markup(),
+        )
     except Exception:
         pass
 
