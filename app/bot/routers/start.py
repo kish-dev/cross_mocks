@@ -21,6 +21,7 @@ from app.bot.keyboards.common import (
     evaluation_keyboard,
     start_session_keyboard,
 )
+from app.services.scheduling import extract_datetime_slots, can_confirm_slot
 
 router = Router()
 
@@ -445,7 +446,7 @@ async def schedule_after_match(message: Message, state: FSMContext):
             return
 
         # try to extract exact datetime slots from free-form text: YYYY-MM-DD HH:MM
-        parsed_slots = re.findall(r"\b\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\b", request_text)
+        parsed_slots = extract_datetime_slots(request_text)
 
         proposal = InterviewProposal(
             student_id=student.id,
@@ -647,16 +648,16 @@ async def proposal_confirm(callback: CallbackQuery):
     async with SessionLocal() as session:
         proposal = (await session.execute(select(InterviewProposal).where(InterviewProposal.id == int(proposal_id)))).scalar_one_or_none()
         picked_str = ((proposal.options_json or {}).get("final_time") if proposal else None)
-        if not picked_str:
-            await callback.answer("Слот не выбран", show_alert=True)
+        if not proposal:
+            await callback.answer("Заявка не найдена", show_alert=True)
+            return
+        if not can_confirm_slot(proposal.status, picked_str):
+            await callback.answer("Слот не выбран или заявка уже обработана", show_alert=True)
             return
         try:
             starts_at = datetime.strptime(picked_str, "%Y-%m-%d %H:%M")
         except ValueError:
             await callback.answer("Некорректное время", show_alert=True)
-            return
-        if not proposal or proposal.status != "pending":
-            await callback.answer("Заявка уже обработана", show_alert=True)
             return
 
         interviewer = (await session.execute(select(User).where(User.id == proposal.interviewer_id))).scalar_one_or_none()
