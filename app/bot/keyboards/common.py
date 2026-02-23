@@ -45,3 +45,10 @@ def evaluation_keyboard(set_id: int) -> InlineKeyboardMarkup:
     kb.button(text="🧾 Заполнить форму оценки", callback_data=f"eval:start:{set_id}")
     kb.adjust(1)
     return kb.as_markup()
+
+
+def resubmit_after_changes_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📝 Отправить исправленный набор", callback_data="menu:submit_pack")
+    kb.adjust(1)
+    return kb.as_markup()

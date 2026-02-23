@@ -15,6 +15,7 @@ from app.bot.keyboards.common import (
     admin_submission_review_keyboard,
     track_keyboard,
     evaluation_keyboard,
+    resubmit_after_changes_keyboard,
 )
 
 router = Router()
@@ -699,7 +700,8 @@ async def admin_submission_comment(message: Message, state: FSMContext):
             student.tg_user_id,
             "По твоему набору нужны правки ✏️\n"
             f"Комментарий админа:\n{comment}\n\n"
-            "После правок отправь обновленный набор снова через кнопку «📝 Отправить свой набор на проверку»."
+            "Нажми кнопку ниже и отправь исправленный набор на повторную проверку.",
+            reply_markup=resubmit_after_changes_keyboard(),
         )
 
     await state.clear()
