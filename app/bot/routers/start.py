@@ -98,6 +98,12 @@ async def safe_send(bot, tg_user_id: int, text: str, **kwargs):
         await bot.send_message(tg_user_id, text, **kwargs)
         return True, ""
     except Exception as e:
+        # queue only plain text retries (keyboards are often stale)
+        try:
+            from app.services.delivery_queue import enqueue
+            enqueue(tg_user_id, text)
+        except Exception:
+            pass
         return False, str(e)
 
 

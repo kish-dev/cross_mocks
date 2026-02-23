@@ -13,6 +13,7 @@ from app.bot.routers import start
 from app.bot.keyboards.common import start_session_keyboard
 from app.db.session import SessionLocal
 from app.db.models import Session, User
+from app.services.delivery_queue import load_all, replace_all
 
 
 logger = logging.getLogger("tgmocks.reminder")
@@ -97,6 +98,26 @@ async def reminder_worker(bot: Bot):
         await asyncio.sleep(60)
 
 
+async def delivery_retry_worker(bot: Bot):
+    while True:
+        try:
+            queued = load_all()
+            if queued:
+                remain = []
+                for item in queued:
+                    try:
+                        await bot.send_message(item["tg_user_id"], item["text"])
+                        logger.info("delivery_retry_ok tg_user_id=%s", item["tg_user_id"])
+                    except Exception as e:
+                        logger.warning("delivery_retry_fail tg_user_id=%s err=%s", item.get("tg_user_id"), e)
+                        remain.append(item)
+                replace_all(remain)
+        except Exception as e:
+            logger.warning("delivery_retry_worker_error err=%s", e)
+
+        await asyncio.sleep(30)
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
@@ -110,6 +131,7 @@ async def main() -> None:
     dp.include_router(start.router)
 
     asyncio.create_task(reminder_worker(bot))
+    asyncio.create_task(delivery_retry_worker(bot))
 
     await dp.start_polling(bot)
 
