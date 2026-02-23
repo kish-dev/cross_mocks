@@ -467,10 +467,10 @@ async def schedule_after_match(message: Message, state: FSMContext):
     try:
         await message.bot.send_message(
             interviewer.tg_user_id,
-            "Новый запрос на собес 📩\\n"
-            f"Кандидат: @{message.from_user.username or 'no_username'}\\n"
-            f"Тема: {TRACK_LABELS.get(track, track)}\\n"
-            f"Пожелания по времени: {request_text}\\n\\n"
+            "Новый запрос на собес 📩\n"
+            f"Кандидат: @{message.from_user.username or 'no_username'}\n"
+            f"Тема: {TRACK_LABELS.get(track, track)}\n"
+            f"Пожелания по времени: {request_text}\n\n"
             "Нажми кнопку и предложи финальный слот в формате YYYY-MM-DD HH:MM",
             reply_markup=kb.as_markup(),
         )
