@@ -7,10 +7,13 @@ from redis.asyncio import Redis
 from app.config import settings
 from app.bot.middlewares.access import AccessMiddleware
 from app.bot.routers import start
+from app.db.session import init_db
 
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
+
+    await init_db()
 
     bot = Bot(settings.BOT_TOKEN)
     redis = Redis.from_url(settings.REDIS_URL)

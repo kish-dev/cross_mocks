@@ -85,3 +85,15 @@ class PairStats(Base):
     interviews_count: Mapped[int] = mapped_column(Integer, default=0)
     last_interview_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     __table_args__ = (UniqueConstraint("user_a_id", "user_b_id", name="uq_pair"),)
+
+
+class PackSubmission(Base):
+    __tablename__ = "pack_submissions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    student_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    content_text: Mapped[str] = mapped_column(Text)
+    source_message_link: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending")  # pending/changes_requested/approved
+    admin_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
