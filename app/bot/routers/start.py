@@ -894,6 +894,8 @@ async def session_start(callback: CallbackQuery, state: FSMContext):
     extra = ""
     if role == "candidate":
         extra = "\n\n" + candidate_feedback_guide()
+    else:
+        extra = "\n\nГайд оценки для собеседующего:\n" + interviewer_rubric_text(s.track_code)
 
     await callback.message.answer(
         f"Ссылка на telemost: {s.meeting_url}\n\n"
