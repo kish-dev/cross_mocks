@@ -801,7 +801,74 @@ async def proposal_start_propose(callback: CallbackQuery, state: FSMContext):
 
     await state.set_state(ProposalFlow.waiting_final_time)
     await state.update_data(proposal_id=proposal_id)
-    await callback.message.answer("Введи итоговое время в формате YYYY-MM-DD HH:MM MSK")
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    now = datetime.utcnow()
+    quick = [
+        now.replace(hour=19, minute=0, second=0, microsecond=0),
+        (now + timedelta(days=1)).replace(hour=20, minute=0, second=0, microsecond=0),
+        (now + timedelta(days=2)).replace(hour=18, minute=30, second=0, microsecond=0),
+    ]
+    kb = InlineKeyboardBuilder()
+    for dt in quick:
+        slot = dt.strftime("%Y-%m-%d %H:%M")
+        kb.button(text=f"🕒 {slot} MSK", callback_data=f"proposal:quick:{proposal_id}:{slot}")
+    kb.adjust(1)
+
+    await callback.message.answer(
+        "Введи итоговое время или выбери быстрый слот (MSK):",
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("proposal:quick:"))
+async def proposal_quick_time(callback: CallbackQuery, state: FSMContext):
+    _, _, proposal_id, slot = callback.data.split(":", 3)
+    await state.set_state(ProposalFlow.waiting_final_time)
+    await state.update_data(proposal_id=int(proposal_id))
+
+    # reuse text handler logic by sending synthetic flow prompt
+    await callback.message.answer(f"Выбран слот: {slot} MSK. Подтверждаю и отправляю кандидату...")
+
+    class Obj:
+        text = slot
+
+    # emulate by setting text in state and calling common logic through helper path
+    normalized = normalize_datetime_input(slot)
+    if not normalized:
+        await callback.answer("Слот некорректен", show_alert=True)
+        return
+
+    # write selected slot to proposal and send to candidate
+    async with SessionLocal() as session:
+        proposal = (await session.execute(select(InterviewProposal).where(InterviewProposal.id == int(proposal_id)))).scalar_one_or_none()
+        if not proposal:
+            await callback.answer("Заявка не найдена", show_alert=True)
+            return
+        proposal.options_json = {**(proposal.options_json or {}), "final_time": normalized}
+        student = (await session.execute(select(User).where(User.id == proposal.student_id))).scalar_one_or_none()
+        await session.commit()
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Слот кайф, подтверждаю", callback_data=f"proposal:confirm:{proposal_id}")
+    kb.button(text="❌ Не подходит", callback_data=f"proposal:reject:{proposal_id}")
+    kb.adjust(1)
+
+    ok, err = await safe_send(
+        callback.bot,
+        student.tg_user_id,
+        "Интервьюер предложил итоговое время:\n"
+        f"{normalized} MSK\n"
+        "Подтверди слот:",
+        reply_markup=kb.as_markup(),
+    )
+    if not ok:
+        await callback.message.answer(f"Не удалось отправить слот кандидату: {err}")
+    else:
+        await callback.message.answer("Слот отправлен кандидату ✅")
+
     await callback.answer()
 
 
