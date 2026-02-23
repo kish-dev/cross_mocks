@@ -44,6 +44,7 @@ class AdminSubmissionFlow(StatesGroup):
 
 
 class EvaluationFlow(StatesGroup):
+    waiting_candidate_pick = State()
     waiting_candidate_username = State()
     waiting_scores = State()
     waiting_comment = State()
@@ -233,6 +234,14 @@ async def eval_start(callback: CallbackQuery, state: FSMContext):
 
     async with SessionLocal() as session:
         set_item = (await session.execute(select(CandidateSet).where(CandidateSet.id == set_id))).scalar_one_or_none()
+        users = (
+            await session.execute(
+                select(User)
+                .where(User.tg_user_id != callback.from_user.id, User.username.is_not(None), User.is_active.is_(True))
+                .order_by(User.created_at.desc())
+                .limit(15)
+            )
+        ).scalars().all()
 
     if not set_item:
         await callback.message.answer("Набор не найден")
@@ -240,8 +249,30 @@ async def eval_start(callback: CallbackQuery, state: FSMContext):
         return
 
     await state.update_data(set_id=set_id, track_code=set_item.track_code)
-    await state.set_state(EvaluationFlow.waiting_candidate_username)
-    await callback.message.answer("Введи username кандидата в формате @username")
+    await state.set_state(EvaluationFlow.waiting_candidate_pick)
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    for u in users:
+        kb.button(text=f"@{u.username}", callback_data=f"eval:candidate:{u.username}")
+    kb.button(text="Ввести вручную", callback_data="eval:candidate:manual")
+    kb.adjust(1)
+
+    await callback.message.answer("Выбери кандидата из списка или введи вручную:", reply_markup=kb.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("eval:candidate:"))
+async def eval_candidate_pick(callback: CallbackQuery, state: FSMContext):
+    picked = callback.data.split(":", 2)[2]
+    if picked == "manual":
+        await state.set_state(EvaluationFlow.waiting_candidate_username)
+        await callback.message.answer("Введи username кандидата в формате @username")
+        await callback.answer()
+        return
+
+    username = picked.strip().lstrip("@").lower()
+    await _evaluation_prompt_scores(callback.message, state, username)
     await callback.answer()
 
 
@@ -252,6 +283,10 @@ async def eval_username(message: Message, state: FSMContext):
         await message.answer("Нужен @username")
         return
 
+    await _evaluation_prompt_scores(message, state, username)
+
+
+async def _evaluation_prompt_scores(target_message: Message, state: FSMContext, username: str):
     data = await state.get_data()
     track = data.get("track_code")
 
@@ -285,7 +320,7 @@ async def eval_username(message: Message, state: FSMContext):
 
     await state.update_data(candidate_username=username)
     await state.set_state(EvaluationFlow.waiting_scores)
-    await message.answer(hint)
+    await target_message.answer(hint)
 
 
 @router.message(EvaluationFlow.waiting_scores)
