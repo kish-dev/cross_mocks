@@ -234,6 +234,49 @@ async def submit_pack_content(message: Message, state: FSMContext):
 
 
 @router.message(F.reply_to_message)
+async def meeting_link_via_reply(message: Message, state: FSMContext):
+    reply_text = ((message.reply_to_message.text or "") + "\n" + (message.reply_to_message.caption or "")).strip()
+    m = re.search(r"session_id=(\d+)", reply_text)
+    if not m:
+        return
+
+    content = (message.text or message.caption or "").strip()
+    url_match = re.search(r"https?://\S+", content)
+    if not url_match:
+        await message.answer("Пришли ссылку на Telemost (URL), и я отправлю кандидату.")
+        return
+
+    session_id = int(m.group(1))
+    meeting_url = url_match.group(0)
+
+    async with SessionLocal() as session:
+        me = (await session.execute(select(User).where(User.tg_user_id == message.from_user.id))).scalar_one_or_none()
+        s = (await session.execute(select(Session).where(Session.id == session_id))).scalar_one_or_none()
+        if not me or not s:
+            await message.answer("Сессия не найдена.")
+            return
+        if me.id != s.interviewer_id:
+            await message.answer("Ссылку может отправить только собеседующий.")
+            return
+
+        candidate = (await session.execute(select(User).where(User.id == s.student_id))).scalar_one_or_none()
+        s.meeting_url = meeting_url
+        await session.commit()
+
+    await message.answer("Ссылку отправил кандидату ✅")
+    if candidate:
+        try:
+            await message.bot.send_message(
+                candidate.tg_user_id,
+                "Ссылка на созвон от интервьюера:\n"
+                f"{meeting_url}\n"
+                f"session_id={session_id}",
+            )
+        except Exception:
+            pass
+
+
+@router.message(F.reply_to_message)
 async def resubmit_via_reply(message: Message, state: FSMContext):
     # one-click flow: user replies to admin changes message with updated set content
     reply_text = ((message.reply_to_message.text or "") + "\n" + (message.reply_to_message.caption or "")).strip()
@@ -739,7 +782,6 @@ async def proposal_confirm(callback: CallbackQuery):
             return
 
         ends_at = starts_at + timedelta(minutes=settings.DEFAULT_DURATION_MIN)
-        telemost_url = f"{settings.TELEMOST_URL.rstrip('/')}/{proposal.id}"
 
         session_row = Session(
             interviewer_id=interviewer.id,
@@ -748,7 +790,7 @@ async def proposal_confirm(callback: CallbackQuery):
             pack_id=proposal.pack_id,
             starts_at=starts_at,
             ends_at=ends_at,
-            meeting_url=telemost_url,
+            meeting_url=settings.TELEMOST_URL,
             status="scheduled",
         )
         session.add(session_row)
@@ -797,7 +839,7 @@ async def proposal_confirm(callback: CallbackQuery):
             f"Тема: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}\n"
             f"Когда: {picked_str} MSK\n"
             f"Добавить в календарь: {gcal}\n"
-            "Можно запустить сразу кнопкой ниже, даже если до старта < 15 минут.",
+            "Ссылку на созвон отправит интервьюер после создания встречи в Telemost.",
             reply_markup=start_only_keyboard(session_row.id),
         )
     except Exception:
@@ -807,12 +849,18 @@ async def proposal_confirm(callback: CallbackQuery):
         # interviewer also receives questions for this interview
         async with SessionLocal() as session2:
             set_item2 = (await session2.execute(select(CandidateSet).where(CandidateSet.id == session_row.pack_id))).scalar_one_or_none()
+
+        candidate_nick = f"@{student.username}" if student.username else f"id:{student.tg_user_id}"
+
         await callback.bot.send_message(
             interviewer.tg_user_id,
             "Собес назначен ✅\n"
             f"Тема: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}\n"
             f"Когда: {picked_str} MSK\n"
+            f"Кандидат: {candidate_nick}\n"
+            f"session_id={session_row.id}\n"
             f"Добавить в календарь: {gcal}\n\n"
+            "Создай встречу в Telemost и ОТВЕТЬ на это сообщение ссылкой — бот перешлёт её кандидату.\n\n"
             "Вопросы для собеса:\n"
             f"{set_item2.questions_text if set_item2 else 'n/a'}\n\n"
             "Гайд оценки для собеседующего:\n"
@@ -839,10 +887,7 @@ async def session_start_now(callback: CallbackQuery):
             await callback.answer("Это не твой собес", show_alert=True)
             return
 
-        # fresh telemost link for immediate start
-        token = int(datetime.utcnow().timestamp())
-        new_link = f"{settings.TELEMOST_URL.rstrip('/')}/{s.id}-{token}"
-        s.meeting_url = new_link
+        # immediate start without auto-generating private meeting link
         s.starts_at = datetime.utcnow()
         s.ends_at = s.starts_at + timedelta(minutes=settings.DEFAULT_DURATION_MIN)
         s.status = "in_progress"
@@ -858,12 +903,13 @@ async def session_start_now(callback: CallbackQuery):
             await callback.bot.send_message(
                 u.tg_user_id,
                 "⚡ Собес начинается сейчас!\n"
-                f"Новая ссылка telemost: {new_link}",
+                f"Базовая ссылка Telemost: {settings.TELEMOST_URL}\n"
+                "Если нужна приватная встреча — интервьюер создает её и отправляет ссылку кандидату reply-сообщением.",
             )
         except Exception:
             pass
 
-    await callback.answer("Новая ссылка отправлена обоим", show_alert=True)
+    await callback.answer("Старт сейчас отправлен обоим", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("session:start:"))
