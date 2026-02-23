@@ -410,20 +410,10 @@ async def pass_random_candidate(callback: CallbackQuery, state: FSMContext):
 
 @router.message(SchedulingFlow.waiting_time_options)
 async def schedule_after_match(message: Message, state: FSMContext):
-    raw = (message.text or "").strip()
-    options_raw = [x.strip() for x in raw.replace(";", ",").split(",") if x.strip()]
-    if not options_raw:
-        await message.answer("Пришли 1-3 вариантов времени через запятую в формате YYYY-MM-DD HH:MM")
+    request_text = (message.text or "").strip()
+    if not request_text:
+        await message.answer("Опиши удобные временные рамки в свободной форме, например: 'завтра после 18:00' или 'весь день в среду'.")
         return
-
-    options = []
-    for item in options_raw[:3]:
-        try:
-            dt = datetime.strptime(item, "%Y-%m-%d %H:%M")
-            options.append(dt)
-        except ValueError:
-            await message.answer(f"Неверный формат времени: {item}. Используй YYYY-MM-DD HH:MM")
-            return
 
     data = await state.get_data()
     track = data.get("track")
@@ -459,7 +449,7 @@ async def schedule_after_match(message: Message, state: FSMContext):
             interviewer_id=interviewer.id,
             track_code=track,
             pack_id=set_item.id,
-            options_json={"options": [d.strftime("%Y-%m-%d %H:%M") for d in options]},
+            options_json={"request": request_text},
             status="pending",
         )
         session.add(proposal)
@@ -468,30 +458,130 @@ async def schedule_after_match(message: Message, state: FSMContext):
 
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     kb = InlineKeyboardBuilder()
-    for d in options:
-        label = d.strftime("%Y-%m-%d %H:%M")
-        kb.button(text=label, callback_data=f"proposal_pick:{proposal.id}:{label}")
+    kb.button(text="🕒 Предложить итоговый слот", callback_data=f"proposal:propose:{proposal.id}")
     kb.adjust(1)
 
     await state.clear()
-    await message.answer("Отправил варианты времени интервьюеру. Жди подтверждение ✅")
+    await message.answer("Запрос отправлен интервьюеру ✅")
 
     try:
         await message.bot.send_message(
             interviewer.tg_user_id,
-            "Новый запрос на собес 📩\n"
-            f"Кандидат: @{message.from_user.username or 'no_username'}\n"
-            f"Тема: {TRACK_LABELS.get(track, track)}\n"
-            "Выбери итоговое время:",
+            "Новый запрос на собес 📩\\n"
+            f"Кандидат: @{message.from_user.username or 'no_username'}\\n"
+            f"Тема: {TRACK_LABELS.get(track, track)}\\n"
+            f"Пожелания по времени: {request_text}\\n\\n"
+            "Нажми кнопку и предложи финальный слот в формате YYYY-MM-DD HH:MM",
             reply_markup=kb.as_markup(),
         )
     except Exception:
         pass
 
 
-@router.callback_query(F.data.startswith("proposal_pick:"))
-async def proposal_pick_time(callback: CallbackQuery):
-    _, proposal_id, picked_str = callback.data.split(":", 2)
+class ProposalFlow(StatesGroup):
+    waiting_final_time = State()
+
+
+@router.callback_query(F.data.startswith("proposal:propose:"))
+async def proposal_start_propose(callback: CallbackQuery, state: FSMContext):
+    proposal_id = int(callback.data.split(":")[-1])
+    async with SessionLocal() as session:
+        proposal = (await session.execute(select(InterviewProposal).where(InterviewProposal.id == proposal_id))).scalar_one_or_none()
+        interviewer = (await session.execute(select(User).where(User.id == proposal.interviewer_id))).scalar_one_or_none() if proposal else None
+
+    if not proposal or not interviewer:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    if callback.from_user.id != interviewer.tg_user_id:
+        await callback.answer("Это не твоя заявка", show_alert=True)
+        return
+
+    await state.set_state(ProposalFlow.waiting_final_time)
+    await state.update_data(proposal_id=proposal_id)
+    await callback.message.answer("Введи итоговое время в формате YYYY-MM-DD HH:MM (Мск)")
+    await callback.answer()
+
+
+@router.message(ProposalFlow.waiting_final_time)
+async def proposal_receive_final_time(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    try:
+        dt = datetime.strptime(raw, "%Y-%m-%d %H:%M")
+    except ValueError:
+        await message.answer("Неверный формат. Используй YYYY-MM-DD HH:MM")
+        return
+
+    data = await state.get_data()
+    proposal_id = data.get("proposal_id")
+    if not proposal_id:
+        await state.clear()
+        await message.answer("Сессия потерялась. Нажми кнопку ещё раз.")
+        return
+
+    async with SessionLocal() as session:
+        proposal = (await session.execute(select(InterviewProposal).where(InterviewProposal.id == int(proposal_id)))).scalar_one_or_none()
+        if not proposal or proposal.status != "pending":
+            await state.clear()
+            await message.answer("Заявка уже обработана")
+            return
+
+        interviewer = (await session.execute(select(User).where(User.id == proposal.interviewer_id))).scalar_one_or_none()
+        student = (await session.execute(select(User).where(User.id == proposal.student_id))).scalar_one_or_none()
+        if not interviewer or not student:
+            await state.clear()
+            await message.answer("Не удалось найти участников")
+            return
+
+        proposal.options_json = {**(proposal.options_json or {}), "final_time": raw}
+        await session.commit()
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Слот кайф, подтверждаю", callback_data=f"proposal:confirm:{proposal_id}:{raw}")
+    kb.button(text="❌ Не подходит", callback_data=f"proposal:reject:{proposal_id}")
+    kb.adjust(1)
+
+    await state.clear()
+    await message.answer("Отправил слот кандидату на подтверждение ✅")
+
+    try:
+        await message.bot.send_message(
+            student.tg_user_id,
+            "Интервьюер предложил итоговое время:\n"
+            f"{raw} (Мск)\n"
+            "Подтверди слот:",
+            reply_markup=kb.as_markup(),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("proposal:reject:"))
+async def proposal_reject(callback: CallbackQuery):
+    proposal_id = int(callback.data.split(":")[-1])
+    async with SessionLocal() as session:
+        proposal = (await session.execute(select(InterviewProposal).where(InterviewProposal.id == proposal_id))).scalar_one_or_none()
+        if not proposal:
+            await callback.answer("Заявка не найдена", show_alert=True)
+            return
+        student = (await session.execute(select(User).where(User.id == proposal.student_id))).scalar_one_or_none()
+        interviewer = (await session.execute(select(User).where(User.id == proposal.interviewer_id))).scalar_one_or_none()
+
+    if not student or callback.from_user.id != student.tg_user_id:
+        await callback.answer("Только кандидат может отклонить", show_alert=True)
+        return
+
+    await callback.answer("Отклонено")
+    await callback.message.answer("Ок, слот отклонён. Интервьюер предложит другой.")
+    try:
+        await callback.bot.send_message(interviewer.tg_user_id, "Кандидат отклонил слот. Предложи другое время через ту же заявку.")
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("proposal:confirm:"))
+async def proposal_confirm(callback: CallbackQuery):
+    _, _, proposal_id, picked_str = callback.data.split(":", 3)
     try:
         starts_at = datetime.strptime(picked_str, "%Y-%m-%d %H:%M")
     except ValueError:
@@ -510,8 +600,8 @@ async def proposal_pick_time(callback: CallbackQuery):
             await callback.answer("Пользователь не найден", show_alert=True)
             return
 
-        if callback.from_user.id != interviewer.tg_user_id:
-            await callback.answer("Это не твоя заявка", show_alert=True)
+        if callback.from_user.id != student.tg_user_id:
+            await callback.answer("Это подтверждает кандидат", show_alert=True)
             return
 
         ends_at = starts_at + timedelta(minutes=settings.DEFAULT_DURATION_MIN)
@@ -541,10 +631,10 @@ async def proposal_pick_time(callback: CallbackQuery):
         await session.commit()
         await session.refresh(session_row)
 
-    await callback.message.answer(f"Время подтверждено: {picked_str} ✅")
+    await callback.message.answer(f"Слот подтвержден: {picked_str} ✅")
     await callback.answer()
 
-    for tg_id, role in [(student.tg_user_id, "candidate"), (interviewer.tg_user_id, "interviewer")]:
+    for tg_id in [student.tg_user_id, interviewer.tg_user_id]:
         try:
             await callback.bot.send_message(
                 tg_id,
