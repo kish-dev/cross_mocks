@@ -736,7 +736,8 @@ async def proposal_confirm(callback: CallbackQuery):
             f"Тема: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}\n"
             f"Когда: {picked_str} (Мск)\n"
             f"Добавить в календарь: {gcal}\n"
-            "За 15 минут напомню и дам кнопку «Пройти собес»."
+            "Можно запустить сразу кнопкой ниже, даже если до старта < 15 минут.",
+            reply_markup=start_session_keyboard(session_row.id),
         )
     except Exception:
         pass
@@ -753,7 +754,8 @@ async def proposal_confirm(callback: CallbackQuery):
             f"Добавить в календарь: {gcal}\n\n"
             "Вопросы для собеса:\n"
             f"{set_item2.questions_text if set_item2 else 'n/a'}\n\n"
-            "За 15 минут напомню и дам кнопку «Пройти собес»."
+            "Можно запустить сразу кнопкой ниже, даже если до старта < 15 минут.",
+            reply_markup=start_session_keyboard(session_row.id),
         )
     except Exception:
         pass
