@@ -227,6 +227,14 @@ async def resubmit_via_reply(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "menu:find_interviewer")
 async def find_interviewer(callback: CallbackQuery):
+    await callback.message.answer("Выбери тему собеса, который хочешь пройти:", reply_markup=track_keyboard("pass_track"))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pass_track:"))
+async def pass_track(callback: CallbackQuery):
+    track = callback.data.split(":", 1)[1]
+
     async with SessionLocal() as session:
         db_user = (await session.execute(select(User).where(User.tg_user_id == callback.from_user.id))).scalar_one_or_none()
         if not db_user:
@@ -234,24 +242,28 @@ async def find_interviewer(callback: CallbackQuery):
             await callback.answer()
             return
 
-        approved_count = (
+        approved_for_track = (
             await session.execute(
                 select(func.count(CandidateSet.id)).where(
                     CandidateSet.owner_user_id == db_user.id,
                     CandidateSet.status == "approved",
+                    CandidateSet.track_code == track,
                 )
             )
         ).scalar_one()
 
-    if approved_count < 1:
+    if approved_for_track < 1:
         await callback.message.answer(
-            "Чтобы пройти собес, сначала отправь минимум 1 свой набор на проверку админа.\n"
-            "Нажми кнопку: «📝 Отправить свой набор на проверку»."
+            "Чтобы пройти собес по этой теме, у тебя должен быть минимум 1 одобренный набор по ней.\n"
+            "Сначала отправь набор на проверку админу."
         )
         await callback.answer()
         return
 
-    await callback.message.answer("Ок, ты можешь проходить собес. Подбор пары/расписания сейчас в следующем шаге разработки.")
+    await callback.message.answer(
+        f"Отлично, по теме {TRACK_LABELS.get(track, track)} ты можешь проходить собес у другого участника ✅\n"
+        "Подбор пары/расписания подключим следующим шагом."
+    )
     await callback.answer()
 
 
