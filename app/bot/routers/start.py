@@ -266,17 +266,27 @@ async def conduct_track(callback: CallbackQuery):
     track = callback.data.split(":", 1)[1]
 
     async with SessionLocal() as session:
+        db_user = (await session.execute(select(User).where(User.tg_user_id == callback.from_user.id))).scalar_one_or_none()
+        if not db_user:
+            await callback.message.answer("Сначала нажми /start")
+            await callback.answer()
+            return
+
         rows = (
             await session.execute(
                 select(CandidateSet.id, CandidateSet.title)
-                .where(CandidateSet.track_code == track, CandidateSet.status == "approved")
+                .where(
+                    CandidateSet.track_code == track,
+                    CandidateSet.status == "approved",
+                    CandidateSet.owner_user_id == db_user.id,
+                )
                 .order_by(CandidateSet.created_at.desc())
                 .limit(20)
             )
         ).all()
 
     if not rows:
-        await callback.message.answer("Пока нет одобренных наборов по этому треку.")
+        await callback.message.answer("У тебя пока нет одобренных наборов по этому треку.")
         await callback.answer()
         return
 
