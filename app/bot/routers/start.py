@@ -93,6 +93,14 @@ def candidate_feedback_guide() -> str:
     )
 
 
+async def safe_send(bot, tg_user_id: int, text: str, **kwargs):
+    try:
+        await bot.send_message(tg_user_id, text, **kwargs)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
 WELCOME = (
     "Привет! Я бот для парных мок-собеседований.\n\n"
     "Что я делаю:\n"
@@ -364,30 +372,34 @@ async def meeting_link_without_reply(message: Message, state: FSMContext):
         s.meeting_url = meeting_url
         await session.commit()
 
-    await message.answer(f"Ссылку отправил кандидату для session_id={s.id} ✅")
-    try:
-        await message.bot.send_message(
-            candidate.tg_user_id,
-            "Ссылка на созвон от интервьюера:\n"
-            f"{meeting_url}\n"
-            f"session_id={s.id}",
-        )
-        await message.bot.send_message(
-            candidate.tg_user_id,
-            "Как оценить качество собеса и общение:\n"
-            f"{candidate_feedback_guide()}"
-        )
-    except Exception:
-        pass
+    ok1, err1 = await safe_send(
+        message.bot,
+        candidate.tg_user_id,
+        "Ссылка на созвон от интервьюера:\n"
+        f"{meeting_url}\n"
+        f"session_id={s.id}",
+    )
+    ok2, err2 = await safe_send(
+        message.bot,
+        candidate.tg_user_id,
+        "Как оценить качество собеса и общение:\n"
+        f"{candidate_feedback_guide()}"
+    )
 
-    try:
-        await message.bot.send_message(
-            me.tg_user_id,
-            "Гайд оценки для собеседующего:\n"
-            f"{interviewer_rubric_text(s.track_code)}"
+    if ok1 and ok2:
+        await message.answer(f"Ссылку отправил кандидату для session_id={s.id} ✅")
+    else:
+        await message.answer(
+            f"Не удалось полностью доставить кандидату для session_id={s.id}.\n"
+            f"link={ok1} ({err1})\nguide={ok2} ({err2})"
         )
-    except Exception:
-        pass
+
+    await safe_send(
+        message.bot,
+        me.tg_user_id,
+        "Гайд оценки для собеседующего:\n"
+        f"{interviewer_rubric_text(s.track_code)}"
+    )
 
 
 @router.message(F.reply_to_message)
@@ -704,14 +716,17 @@ async def schedule_after_match(message: Message, state: FSMContext):
 
     await message.answer(payload.student_text)
 
-    try:
-        await message.bot.send_message(
-            payload.interviewer_tg_user_id,
-            payload.interviewer_text,
-            reply_markup=kb.as_markup(),
+    ok, err = await safe_send(
+        message.bot,
+        payload.interviewer_tg_user_id,
+        payload.interviewer_text,
+        reply_markup=kb.as_markup(),
+    )
+    if not ok:
+        await message.answer(
+            "Не удалось отправить запрос интервьюеру. Проверь, что он запускал /start и доступен боту.\n"
+            f"Техдеталь: {err}"
         )
-    except Exception:
-        await message.answer("Не удалось отправить запрос интервьюеру. Проверь, что он запускал /start и доступен боту.")
 
 
 class ProposalFlow(StatesGroup):
@@ -826,16 +841,19 @@ async def proposal_receive_final_time(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Отправил слот кандидату на подтверждение ✅")
 
-    try:
-        await message.bot.send_message(
-            student.tg_user_id,
-            "Интервьюер предложил итоговое время:\n"
-            f"{raw} MSK\n"
-            "Подтверди слот:",
-            reply_markup=kb.as_markup(),
+    ok, err = await safe_send(
+        message.bot,
+        student.tg_user_id,
+        "Интервьюер предложил итоговое время:\n"
+        f"{raw} MSK\n"
+        "Подтверди слот:",
+        reply_markup=kb.as_markup(),
+    )
+    if not ok:
+        await message.answer(
+            "Не удалось отправить слот кандидату. Проверь, что кандидат запускал /start и доступен боту.\n"
+            f"Техдеталь: {err}"
         )
-    except Exception:
-        await message.answer("Не удалось отправить слот кандидату. Проверь, что кандидат запускал /start и доступен боту.")
 
 
 @router.callback_query(F.data.startswith("proposal:reject:"))
@@ -1059,30 +1077,29 @@ async def session_start(callback: CallbackQuery, state: FSMContext):
     # kickoff routing: notify second participant + role-specific startup prompts
     if first_start and student and interviewer:
         second_tg_id = interviewer.tg_user_id if me.id == student.id else student.tg_user_id
-        try:
-            await callback.bot.send_message(second_tg_id, "Партнер нажал «Пройти собес». Собес ожидает начала.")
-        except Exception:
-            pass
+        ok1, err1 = await safe_send(callback.bot, second_tg_id, "Партнер нажал «Пройти собес». Собес ожидает начала.")
 
-        try:
-            await callback.bot.send_message(
-                interviewer.tg_user_id,
-                "Создай ссылку на созвон в Telemost:\n"
-                f"{settings.TELEMOST_URL}\n\n"
-                f"Кандидат: @{student.username if student.username else student.tg_user_id}\n"
-                f"session_id={session_id}\n"
-                "Отправь ссылку reply-ответом на это сообщение — она будет направлена кандидату.",
-            )
-        except Exception:
-            pass
+        ok2, err2 = await safe_send(
+            callback.bot,
+            interviewer.tg_user_id,
+            "Создай ссылку на созвон в Telemost:\n"
+            f"{settings.TELEMOST_URL}\n\n"
+            f"Кандидат: @{student.username if student.username else student.tg_user_id}\n"
+            f"session_id={session_id}\n"
+            "Отправь ссылку reply-ответом или обычным сообщением — она будет направлена кандидату.",
+        )
 
-        try:
-            await callback.bot.send_message(
-                student.tg_user_id,
-                "Ссылка на созвон появится, когда интервьюер создаст её. Отправлю новым сообщением."
+        ok3, err3 = await safe_send(
+            callback.bot,
+            student.tg_user_id,
+            "Ссылка на созвон появится, когда интервьюер создаст её. Отправлю новым сообщением."
+        )
+
+        if not (ok1 and ok2 and ok3):
+            await callback.message.answer(
+                "⚠️ Не все служебные сообщения доставлены.\n"
+                f"second={ok1} ({err1})\ninterviewer={ok2} ({err2})\nstudent={ok3} ({err3})"
             )
-        except Exception:
-            pass
 
     # no extra prompt for candidate here; feedback request happens later in flow
     await callback.answer()
