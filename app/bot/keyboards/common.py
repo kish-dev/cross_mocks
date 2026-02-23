@@ -50,6 +50,7 @@ def evaluation_keyboard(set_id: int) -> InlineKeyboardMarkup:
 def start_session_keyboard(session_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="▶️ Пройти собес", callback_data=f"session:start:{session_id}")
+    kb.button(text="⚡ Начать сейчас", callback_data=f"session:start_now:{session_id}")
     kb.adjust(1)
     return kb.as_markup()
 

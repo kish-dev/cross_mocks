@@ -721,6 +721,47 @@ async def proposal_confirm(callback: CallbackQuery):
             pass
 
 
+@router.callback_query(F.data.startswith("session:start_now:"))
+async def session_start_now(callback: CallbackQuery):
+    session_id = int(callback.data.split(":")[-1])
+
+    async with SessionLocal() as session:
+        s = (await session.execute(select(Session).where(Session.id == session_id))).scalar_one_or_none()
+        if not s:
+            await callback.answer("Собес не найден", show_alert=True)
+            return
+
+        me = (await session.execute(select(User).where(User.tg_user_id == callback.from_user.id))).scalar_one_or_none()
+        if not me or me.id not in {s.student_id, s.interviewer_id}:
+            await callback.answer("Это не твой собес", show_alert=True)
+            return
+
+        # fresh telemost link for immediate start
+        token = int(datetime.utcnow().timestamp())
+        new_link = f"{settings.TELEMOST_URL.rstrip('/')}/{s.id}-{token}"
+        s.meeting_url = new_link
+        s.starts_at = datetime.utcnow()
+        s.ends_at = s.starts_at + timedelta(minutes=settings.DEFAULT_DURATION_MIN)
+        await session.commit()
+
+        student = (await session.execute(select(User).where(User.id == s.student_id))).scalar_one_or_none()
+        interviewer = (await session.execute(select(User).where(User.id == s.interviewer_id))).scalar_one_or_none()
+
+    for u in [student, interviewer]:
+        if not u:
+            continue
+        try:
+            await callback.bot.send_message(
+                u.tg_user_id,
+                "⚡ Собес начинается сейчас!\n"
+                f"Новая ссылка telemost: {new_link}",
+            )
+        except Exception:
+            pass
+
+    await callback.answer("Новая ссылка отправлена обоим", show_alert=True)
+
+
 @router.callback_query(F.data.startswith("session:start:"))
 async def session_start(callback: CallbackQuery, state: FSMContext):
     session_id = int(callback.data.split(":")[-1])
