@@ -128,7 +128,6 @@ class SchedulingFlow(StatesGroup):
 
 
 class SessionClosureFlow(StatesGroup):
-    waiting_score = State()
     waiting_comment = State()
 
 
@@ -271,6 +270,11 @@ async def meeting_link_via_reply(message: Message, state: FSMContext):
                 "Ссылка на созвон от интервьюера:\n"
                 f"{meeting_url}\n"
                 f"session_id={session_id}",
+            )
+            await message.bot.send_message(
+                candidate.tg_user_id,
+                "Как оценить качество собеса и общение:\n"
+                f"{candidate_feedback_guide()}"
             )
         except Exception:
             pass
@@ -933,44 +937,55 @@ async def session_start(callback: CallbackQuery, state: FSMContext):
             await callback.answer("Это не твой собес", show_alert=True)
             return
 
-    # mark session as started when at least one participant pressed start
-    async with SessionLocal() as session:
-        s2 = (await session.execute(select(Session).where(Session.id == session_id))).scalar_one_or_none()
-        if s2 and s2.status == "scheduled":
-            s2.status = "in_progress"
+        student = (await session.execute(select(User).where(User.id == s.student_id))).scalar_one_or_none()
+        interviewer = (await session.execute(select(User).where(User.id == s.interviewer_id))).scalar_one_or_none()
+
+        first_start = False
+        if s.status == "scheduled":
+            s.status = "in_progress"
             await session.commit()
+            first_start = True
 
     role = "candidate" if me.id == s.student_id else "interviewer"
-    await state.set_state(SessionClosureFlow.waiting_score)
+    await state.set_state(SessionClosureFlow.waiting_comment)
     await state.update_data(session_id=session_id, role=role)
 
-    extra = ""
-    if role == "candidate":
-        extra = "\n\n" + candidate_feedback_guide()
+    # kickoff routing: notify second participant + role-specific startup prompts
+    if first_start and student and interviewer:
+        second_tg_id = interviewer.tg_user_id if me.id == student.id else student.tg_user_id
+        try:
+            await callback.bot.send_message(second_tg_id, "Партнер нажал «Пройти собес». Собес ожидает начала.")
+        except Exception:
+            pass
+
+        try:
+            await callback.bot.send_message(
+                interviewer.tg_user_id,
+                "Создай ссылку на созвон в Telemost:\n"
+                f"{settings.TELEMOST_URL}\n\n"
+                f"Кандидат: @{student.username if student.username else student.tg_user_id}\n"
+                f"session_id={session_id}\n"
+                "Отправь ссылку reply-ответом на это сообщение — она будет направлена кандидату.",
+            )
+        except Exception:
+            pass
+
+        try:
+            await callback.bot.send_message(
+                student.tg_user_id,
+                "Ссылка на созвон появится, когда интервьюер создаст её. Отправлю новым сообщением."
+            )
+        except Exception:
+            pass
 
     await callback.message.answer(
-        f"Ссылка на созвон: {s.meeting_url}\n\n"
-        "После собеса заполни форму: поставь оценку 0-3"
-        f"{extra}"
+        "После собеса отправь фидбек свободным текстом.\n"
+        "Рекомендуемый формат первой строки: Итог: <цифра>"
     )
     await callback.answer()
 
 
-@router.message(SessionClosureFlow.waiting_score)
-async def session_review_score(message: Message, state: FSMContext):
-    try:
-        score = int((message.text or "").strip())
-    except ValueError:
-        await message.answer("Оценка должна быть числом 0-3")
-        return
-    if score < 0 or score > 3:
-        await message.answer("Оценка должна быть в диапазоне 0-3")
-        return
-
-    await state.update_data(score=score)
-    await state.set_state(SessionClosureFlow.waiting_comment)
-    await message.answer("Добавь короткий фидбек по собесу")
-
+# SessionClosureFlow uses free-form single-step feedback in waiting_comment
 
 @router.message(SessionClosureFlow.waiting_comment)
 async def session_review_comment(message: Message, state: FSMContext):
@@ -982,7 +997,9 @@ async def session_review_comment(message: Message, state: FSMContext):
     data = await state.get_data()
     session_id = data.get("session_id")
     role = data.get("role")
-    score = data.get("score")
+
+    m = re.search(r"итог\s*:\s*(\d+)", comment.lower())
+    score = int(m.group(1)) if m else 0
 
     async with SessionLocal() as session:
         s = (await session.execute(select(Session).where(Session.id == session_id))).scalar_one_or_none()
