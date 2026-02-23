@@ -86,7 +86,18 @@ async def submit_track_pick(callback: CallbackQuery, state: FSMContext):
     track = callback.data.split(":", 1)[1]
     await state.update_data(track=track)
     await state.set_state(SubmissionFlow.waiting_title)
-    await callback.message.answer("Ок. Теперь пришли название этого набора (например: 'Теория #1 Android Core').")
+
+    title_example = {
+        "theory": "theory: Android Core #1",
+        "sysdesign": "system-design: URL Shortener #1",
+        "livecoding": "livecoding: Two Sum + LRU #1",
+        "final": "final: self-intro + project deep-dive #1",
+    }.get(track, "topic: your-set-name #1")
+
+    await callback.message.answer(
+        "Ок. Теперь пришли название этого набора.\n"
+        f"Пример для {TRACK_LABELS.get(track, track)}: {title_example}"
+    )
     await callback.answer()
 
 
@@ -590,12 +601,46 @@ async def my_stats(callback: CallbackQuery):
             )
         ).scalar_one()
 
+        last5_as_interviewer = (
+            await session.execute(
+                select(QuickEvaluation.candidate_username, QuickEvaluation.score, CandidateSet.track_code)
+                .join(CandidateSet, CandidateSet.id == QuickEvaluation.set_id, isouter=True)
+                .where(QuickEvaluation.interviewer_tg_user_id == db_user.tg_user_id)
+                .order_by(QuickEvaluation.created_at.desc())
+                .limit(5)
+            )
+        ).all()
+
+        last5_as_candidate = []
+        if db_user.username:
+            last5_as_candidate = (
+                await session.execute(
+                    select(QuickEvaluation.interviewer_tg_user_id, QuickEvaluation.score, CandidateSet.track_code)
+                    .join(CandidateSet, CandidateSet.id == QuickEvaluation.set_id, isouter=True)
+                    .where(func.lower(QuickEvaluation.candidate_username) == db_user.username.lower())
+                    .order_by(QuickEvaluation.created_at.desc())
+                    .limit(5)
+                )
+            ).all()
+
+    interviewer_lines = "\n".join(
+        f"  • @{cand}: {round(score/100, 2)} ({TRACK_LABELS.get(track or 'unknown', track or 'unknown')})"
+        for cand, score, track in last5_as_interviewer
+    ) or "  • нет данных"
+
+    candidate_lines = "\n".join(
+        f"  • interviewer_id={int_id}: {round(score/100, 2)} ({TRACK_LABELS.get(track or 'unknown', track or 'unknown')})"
+        for int_id, score, track in last5_as_candidate
+    ) or "  • нет данных"
+
     await callback.message.answer(
         "Твоя статистика:\n"
         f"— Проходил собесы: {passed_count}\n"
         f"— Проводил собесы: {conducted_count}\n"
         f"— Средняя оценка как собеседуемый: {round(avg_as_student, 2) if avg_as_student is not None else 'n/a'}\n"
-        f"— Средняя оценка как собеседующий: {round(avg_as_interviewer, 2) if avg_as_interviewer is not None else 'n/a'}"
+        f"— Средняя оценка как собеседующий: {round(avg_as_interviewer, 2) if avg_as_interviewer is not None else 'n/a'}\n\n"
+        f"Последние 5 как интервьюер:\n{interviewer_lines}\n\n"
+        f"Последние 5 как собеседуемый:\n{candidate_lines}"
     )
     await callback.answer()
 
