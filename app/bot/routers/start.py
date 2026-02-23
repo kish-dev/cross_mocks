@@ -154,8 +154,6 @@ async def resubmit_via_reply(message: Message, state: FSMContext):
     # one-click flow: user replies to admin changes message with updated set content
     reply_text = ((message.reply_to_message.text or "") + "\n" + (message.reply_to_message.caption or "")).strip()
     m = re.search(r"set_id=(\d+)", reply_text)
-    if not m:
-        return
 
     # cancel any stale FSM state so reply-based resubmission always works
     await state.clear()
@@ -165,22 +163,37 @@ async def resubmit_via_reply(message: Message, state: FSMContext):
         await message.answer("Отправь исправленный набор текстом или ссылкой одним сообщением.")
         return
 
-    set_id = int(m.group(1))
-
     async with SessionLocal() as session:
         db_user = (await session.execute(select(User).where(User.tg_user_id == message.from_user.id))).scalar_one_or_none()
         if not db_user:
             await message.answer("Сначала нажми /start")
             return
 
-        set_item = (
-            await session.execute(
-                select(CandidateSet).where(CandidateSet.id == set_id, CandidateSet.owner_user_id == db_user.id)
-            )
-        ).scalar_one_or_none()
+        set_item = None
+        if m:
+            set_id = int(m.group(1))
+            set_item = (
+                await session.execute(
+                    select(CandidateSet).where(CandidateSet.id == set_id, CandidateSet.owner_user_id == db_user.id)
+                )
+            ).scalar_one_or_none()
+
+        # fallback: if set_id not parsed (or old message), use latest changes_requested set for this user
+        if not set_item:
+            set_item = (
+                await session.execute(
+                    select(CandidateSet)
+                    .where(CandidateSet.owner_user_id == db_user.id, CandidateSet.status == "changes_requested")
+                    .order_by(CandidateSet.updated_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
 
         if not set_item:
-            await message.answer("Не нашёл твой набор для этого set_id. Проверь, что отвечаешь на корректное сообщение.")
+            await message.answer(
+                "Не нашёл набор в статусе правок.\n"
+                "Ответь именно на сообщение бота с правками или попроси админа заново отправить правки."
+            )
             return
 
         set_item.questions_text = content
