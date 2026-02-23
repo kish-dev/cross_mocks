@@ -1,4 +1,5 @@
 import re
+import random
 from datetime import datetime, timedelta
 
 from aiogram import Router, F
@@ -280,7 +281,7 @@ async def pass_track(callback: CallbackQuery, state: FSMContext):
         # кандидаты-интервьюеры: есть approved набор по треку, не сам пользователь
         candidates = (
             await session.execute(
-                select(User.id)
+                select(User)
                 .join(CandidateSet, CandidateSet.owner_user_id == User.id)
                 .where(
                     User.id != db_user.id,
@@ -297,38 +298,105 @@ async def pass_track(callback: CallbackQuery, state: FSMContext):
             await callback.answer()
             return
 
-        # приоритет: с кем собес был максимально давно (или никогда)
-        now = datetime.utcnow()
-        best_id = None
-        best_score = None
-        for candidate_id in candidates:
-            a, b = sorted((db_user.id, candidate_id))
-            pair = (
+        never_had = []
+        had_other_topic = []
+
+        for candidate in candidates:
+            pair_sessions = (
                 await session.execute(
-                    select(PairStats).where(PairStats.user_a_id == a, PairStats.user_b_id == b)
+                    select(Session.track_code, Session.starts_at).where(
+                        ((Session.student_id == db_user.id) & (Session.interviewer_id == candidate.id))
+                        | ((Session.student_id == candidate.id) & (Session.interviewer_id == db_user.id))
+                    )
                 )
-            ).scalar_one_or_none()
+            ).all()
 
-            if not pair or not pair.last_interview_at:
-                score = float("inf")
-            else:
-                score = (now - pair.last_interview_at).total_seconds()
+            if not pair_sessions:
+                never_had.append(candidate)
+                continue
 
-            if best_score is None or score > best_score:
-                best_score = score
-                best_id = candidate_id
+            had_same_track = any(t == track for t, _ in pair_sessions)
+            if not had_same_track:
+                had_other_topic.append(candidate)
 
-        interviewer = (await session.execute(select(User).where(User.id == best_id))).scalar_one_or_none()
-        if not interviewer:
-            await callback.message.answer("Не удалось подобрать интервьюера, попробуй ещё раз.")
+        # топ-5 в каждой категории
+        top_never = never_had[:5]
+        top_other = had_other_topic[:5]
+
+        if not top_never and not top_other:
+            await callback.message.answer("По этой теме нет кандидатов под условия топов. Попробуй позже.")
             await callback.answer()
             return
 
-    await state.set_state(SchedulingFlow.waiting_datetime)
-    await state.update_data(track=track, interviewer_id=interviewer.id)
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    kb = InlineKeyboardBuilder()
+    if top_never:
+        for u in top_never:
+            kb.button(text=f"🆕 @{u.username or u.id} (без собеса)", callback_data=f"pass_pick:{track}:{u.id}")
+    if top_other:
+        for u in top_other:
+            kb.button(text=f"🔁 @{u.username or u.id} (другая тема)", callback_data=f"pass_pick:{track}:{u.id}")
+
+    pool_ids = [u.id for u in top_never + top_other]
+    await state.update_data(track=track, candidate_pool=pool_ids)
+    kb.button(text="🎲 Выбрать случайного", callback_data=f"pass_random:{track}")
+    kb.adjust(1)
 
     await callback.message.answer(
-        f"Нашёл интервьюера: @{interviewer.username or 'no_username'} ✅\n"
+        "Выбери кандидата для собеса:\n"
+        "— сначала топ-5, с кем ещё не было собеса\n"
+        "— затем топ-5, с кем был собес на другой теме",
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pass_pick:"))
+async def pass_pick_candidate(callback: CallbackQuery, state: FSMContext):
+    _, track, interviewer_id = callback.data.split(":", 2)
+
+    async with SessionLocal() as session:
+        interviewer = (await session.execute(select(User).where(User.id == int(interviewer_id)))).scalar_one_or_none()
+    if not interviewer:
+        await callback.message.answer("Кандидат не найден.")
+        await callback.answer()
+        return
+
+    await state.set_state(SchedulingFlow.waiting_datetime)
+    await state.update_data(track=track, interviewer_id=int(interviewer_id))
+
+    await callback.message.answer(
+        f"Выбран интервьюер: @{interviewer.username or 'no_username'} ✅\n"
+        "Пришли удобное время в формате YYYY-MM-DD HH:MM (Мск), например: 2026-02-24 19:30"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pass_random:"))
+async def pass_random_candidate(callback: CallbackQuery, state: FSMContext):
+    track = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    pool = data.get("candidate_pool") or []
+    if not pool:
+        await callback.message.answer("Пул кандидатов пуст, выбери тему заново.")
+        await callback.answer()
+        return
+
+    interviewer_id = random.choice(pool)
+
+    async with SessionLocal() as session:
+        interviewer = (await session.execute(select(User).where(User.id == int(interviewer_id)))).scalar_one_or_none()
+    if not interviewer:
+        await callback.message.answer("Случайный кандидат недоступен, попробуй ещё раз.")
+        await callback.answer()
+        return
+
+    await state.set_state(SchedulingFlow.waiting_datetime)
+    await state.update_data(track=track, interviewer_id=int(interviewer_id))
+
+    await callback.message.answer(
+        f"Случайный выбор: @{interviewer.username or 'no_username'} 🎲\n"
         "Пришли удобное время в формате YYYY-MM-DD HH:MM (Мск), например: 2026-02-24 19:30"
     )
     await callback.answer()
