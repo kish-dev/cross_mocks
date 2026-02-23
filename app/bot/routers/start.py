@@ -1548,7 +1548,7 @@ async def _render_upcoming_page(target_message, tg_user_id: int, page: int = 0):
         kb = InlineKeyboardBuilder()
 
         lines = [f"Предстоящие собесы (страница {page + 1}) — время в MSK:"]
-        for s, set_title, student_username, student_tg_id in chunk:
+        for idx, (s, set_title, student_username, student_tg_id) in enumerate(chunk, start=start + 1):
             is_interviewer = s.interviewer_id == me.id
             role = "собеседующий" if is_interviewer else "собеседуемый"
 
@@ -1563,18 +1563,12 @@ async def _render_upcoming_page(target_message, tg_user_id: int, page: int = 0):
 
             title_part = f" | набор: {set_title or 'n/a'}" if is_interviewer else ""
             lines.append(
-                f"• #{s.id} | {s.starts_at.strftime('%Y-%m-%d %H:%M')} MSK | {TRACK_LABELS.get(s.track_code, s.track_code)} | {role} | второй: {peer_name}{title_part}"
+                f"• {idx}. {s.starts_at.strftime('%Y-%m-%d %H:%M')} MSK | {TRACK_LABELS.get(s.track_code, s.track_code)} | {role} | второй: {peer_name}{title_part} (id:{s.id})"
             )
 
             # per-session actions
-            gcal = to_gcal_link(
-                title=f"Mock interview: {TRACK_LABELS.get(s.track_code, s.track_code)}",
-                details=f"Session #{s.id}. Telemost: {s.meeting_url}",
-                start_dt=s.starts_at,
-                end_dt=s.ends_at,
-            )
-            kb.button(text=f"📅 Календарь #{s.id}", callback_data=f"upg:cal:{s.id}")
-            kb.button(text=f"🗑 Удалить #{s.id}", callback_data=f"upg:del:{s.id}")
+            kb.button(text=f"📅 Календарь {idx}", callback_data=f"upg:cal:{s.id}")
+            kb.button(text=f"🗑 Удалить {idx}", callback_data=f"upg:del:{s.id}")
 
         if page > 0:
             kb.button(text="⬅️ Назад", callback_data=f"upg:page:{page-1}")
