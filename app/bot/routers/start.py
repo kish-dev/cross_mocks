@@ -345,6 +345,8 @@ async def eval_comment(message: Message, state: FSMContext):
 
     data = await state.get_data()
     avg = float(data["final_avg"])
+    candidate_username = data["candidate_username"]
+    track_code = data.get("track_code", "unknown")
 
     if avg >= 2.5:
         verdict = "готов к рынку"
@@ -353,22 +355,67 @@ async def eval_comment(message: Message, state: FSMContext):
     else:
         verdict = "рано, продолжаем подготовку"
 
+    candidate_tg_user_id = None
+
     async with SessionLocal() as session:
         item = QuickEvaluation(
             interviewer_tg_user_id=message.from_user.id,
-            candidate_username=data["candidate_username"],
+            candidate_username=candidate_username,
             set_id=data.get("set_id"),
             score=int(round(avg * 100)),  # храним средний балл * 100
             comment=f"avg={avg}; verdict={verdict}; rubric={data.get('rubric')}; note={comment}",
         )
         session.add(item)
+
+        candidate_user = (
+            await session.execute(select(User).where(func.lower(User.username) == candidate_username.lower()))
+        ).scalar_one_or_none()
+        if candidate_user:
+            candidate_tg_user_id = candidate_user.tg_user_id
+
         await session.commit()
 
+    # 1) Отправка кандидату (если найден в базе)
+    if candidate_tg_user_id:
+        try:
+            await message.bot.send_message(
+                candidate_tg_user_id,
+                "По тебе заполнена оценка собеседования 📌\n"
+                f"Трек: {track_code}\n"
+                f"Средний балл: {avg}\n"
+                f"Итог: {verdict}\n"
+                f"Комментарий: {comment}",
+            )
+        except Exception:
+            pass
+
+    # 2) Отправка админу(ам)
+    for admin_id in settings.admin_ids:
+        try:
+            await message.bot.send_message(
+                admin_id,
+                "Новая оценка собеседования ✅\n"
+                f"Интервьюер: @{message.from_user.username or 'no_username'} (id={message.from_user.id})\n"
+                f"Кандидат: @{candidate_username}\n"
+                f"Трек: {track_code}\n"
+                f"Средний балл: {avg}\n"
+                f"Итог: {verdict}\n"
+                f"Рубрика: {data.get('rubric')}\n"
+                f"Комментарий: {comment}",
+            )
+        except Exception:
+            pass
+
     await state.clear()
+    delivery_note = ""
+    if not candidate_tg_user_id:
+        delivery_note = "\nКандидат не найден в базе по username — ему не доставлено."
+
     await message.answer(
         "Форма оценки сохранена ✅\n"
         f"Средний балл: {avg}\n"
         f"Итог: {verdict}"
+        f"{delivery_note}"
     )
 
 
@@ -473,10 +520,24 @@ async def admin_stats_role(callback: CallbackQuery, state: FSMContext):
                     )
                 )
             ).scalar_one()
+
+            track_rows = (
+                await session.execute(
+                    select(CandidateSet.track_code, func.avg(QuickEvaluation.score), func.count(QuickEvaluation.id))
+                    .join(CandidateSet, CandidateSet.id == QuickEvaluation.set_id)
+                    .where(func.lower(QuickEvaluation.candidate_username) == username.lower())
+                    .group_by(CandidateSet.track_code)
+                )
+            ).all()
+            tracks_text = "\n".join(
+                f"  • {track}: avg={round((avg100 or 0)/100, 2)} (n={n})" for track, avg100, n in track_rows
+            ) or "  • нет данных"
+
             text = (
                 f"Админ-статистика для @{username} (как собеседуемый):\n"
                 f"— Кол-во прохождений: {cnt}\n"
-                f"— Средняя оценка: {round(avg, 2) if avg is not None else 'n/a'}"
+                f"— Средняя оценка: {round(avg, 2) if avg is not None else 'n/a'}\n"
+                f"— По трекам (из форм оценок):\n{tracks_text}"
             )
         else:
             cnt = (await session.execute(select(func.count(Session.id)).where(Session.interviewer_id == db_user.id))).scalar_one()
@@ -488,10 +549,24 @@ async def admin_stats_role(callback: CallbackQuery, state: FSMContext):
                     )
                 )
             ).scalar_one()
+
+            track_rows = (
+                await session.execute(
+                    select(CandidateSet.track_code, func.avg(QuickEvaluation.score), func.count(QuickEvaluation.id))
+                    .join(CandidateSet, CandidateSet.id == QuickEvaluation.set_id)
+                    .where(QuickEvaluation.interviewer_tg_user_id == db_user.tg_user_id)
+                    .group_by(CandidateSet.track_code)
+                )
+            ).all()
+            tracks_text = "\n".join(
+                f"  • {track}: avg={round((avg100 or 0)/100, 2)} (n={n})" for track, avg100, n in track_rows
+            ) or "  • нет данных"
+
             text = (
                 f"Админ-статистика для @{username} (как собеседующий):\n"
                 f"— Кол-во проведений: {cnt}\n"
-                f"— Средняя оценка от собеседуемых: {round(avg, 2) if avg is not None else 'n/a'}"
+                f"— Средняя оценка от собеседуемых: {round(avg, 2) if avg is not None else 'n/a'}\n"
+                f"— По трекам (из форм оценок):\n{tracks_text}"
             )
 
     await state.clear()
