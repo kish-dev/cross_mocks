@@ -1,3 +1,5 @@
+import re
+
 from aiogram import Router, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -15,7 +17,6 @@ from app.bot.keyboards.common import (
     admin_submission_review_keyboard,
     track_keyboard,
     evaluation_keyboard,
-    resubmit_after_changes_keyboard,
 )
 
 router = Router()
@@ -38,7 +39,6 @@ class SubmissionFlow(StatesGroup):
     waiting_track = State()
     waiting_title = State()
     waiting_questions = State()
-    waiting_resubmission = State()
 
 
 class AdminSubmissionFlow(StatesGroup):
@@ -142,37 +142,39 @@ async def submit_pack_content(message: Message, state: FSMContext):
     await message.answer("Отправил набор на проверку админу ✅")
 
 
-@router.callback_query(F.data.startswith("set:resubmit:"))
-async def resubmit_set_entry(callback: CallbackQuery, state: FSMContext):
-    set_id = int(callback.data.split(":")[-1])
-    await state.set_state(SubmissionFlow.waiting_resubmission)
-    await state.update_data(resubmit_set_id=set_id)
-    await callback.message.answer(
-        "Отправь исправленную ссылку/набор ОДНИМ сообщением.\n"
-        "Я отправлю это админу на повторную проверку."
-    )
-    await callback.answer()
+@router.message(F.reply_to_message)
+async def resubmit_via_reply(message: Message, state: FSMContext):
+    # one-click flow: user replies to admin changes message with updated set content
+    current_state = await state.get_state()
+    if current_state is not None:
+        return
 
+    reply_text = (message.reply_to_message.text or "")
+    m = re.search(r"set_id=(\d+)", reply_text)
+    if not m:
+        return
 
-@router.message(SubmissionFlow.waiting_resubmission)
-async def resubmit_set_content(message: Message, state: FSMContext):
     content = (message.text or message.caption or "").strip()
     if not content:
-        await message.answer("Нужно отправить текст или ссылку одним сообщением.")
+        await message.answer("Отправь исправленный набор текстом или ссылкой одним сообщением.")
         return
 
-    data = await state.get_data()
-    set_id = data.get("resubmit_set_id")
-    if not set_id:
-        await state.clear()
-        await message.answer("Не удалось определить набор. Нажми кнопку из сообщения с правками ещё раз.")
-        return
+    set_id = int(m.group(1))
 
     async with SessionLocal() as session:
-        set_item = (await session.execute(select(CandidateSet).where(CandidateSet.id == set_id))).scalar_one_or_none()
+        db_user = (await session.execute(select(User).where(User.tg_user_id == message.from_user.id))).scalar_one_or_none()
+        if not db_user:
+            await message.answer("Сначала нажми /start")
+            return
+
+        set_item = (
+            await session.execute(
+                select(CandidateSet).where(CandidateSet.id == set_id, CandidateSet.owner_user_id == db_user.id)
+            )
+        ).scalar_one_or_none()
+
         if not set_item:
-            await state.clear()
-            await message.answer("Набор не найден.")
+            await message.answer("Не нашёл твой набор для этого set_id. Проверь, что отвечаешь на корректное сообщение.")
             return
 
         set_item.questions_text = content
@@ -195,7 +197,6 @@ async def resubmit_set_content(message: Message, state: FSMContext):
         except Exception:
             pass
 
-    await state.clear()
     await message.answer("Исправления отправлены админу на повторную проверку ✅")
 
 
@@ -757,9 +758,9 @@ async def admin_submission_comment(message: Message, state: FSMContext):
         await message.bot.send_message(
             student.tg_user_id,
             "По твоему набору нужны правки ✏️\n"
+            f"set_id={submission_id}\n"
             f"Комментарий админа:\n{comment}\n\n"
-            "Нажми кнопку ниже и отправь исправленный набор на повторную проверку.",
-            reply_markup=resubmit_after_changes_keyboard(submission_id),
+            "Просто ответь на это сообщение одним сообщением (ссылкой или текстом исправленного набора), и я отправлю на повторную проверку админу."
         )
 
     await state.clear()

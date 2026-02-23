@@ -47,8 +47,4 @@ def evaluation_keyboard(set_id: int) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def resubmit_after_changes_keyboard(set_id: int) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    kb.button(text="📝 Отправить исправленный набор", callback_data=f"set:resubmit:{set_id}")
-    kb.adjust(1)
-    return kb.as_markup()
+# removed: resubmit button flow in favor of direct reply flow
