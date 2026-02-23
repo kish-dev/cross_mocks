@@ -275,6 +275,15 @@ async def meeting_link_via_reply(message: Message, state: FSMContext):
         except Exception:
             pass
 
+    try:
+        await message.bot.send_message(
+            me.tg_user_id,
+            "Гайд оценки для собеседующего:\n"
+            f"{interviewer_rubric_text(s.track_code)}"
+        )
+    except Exception:
+        pass
+
 
 @router.message(F.reply_to_message)
 async def resubmit_via_reply(message: Message, state: FSMContext):
@@ -839,7 +848,7 @@ async def proposal_confirm(callback: CallbackQuery):
             f"Тема: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}\n"
             f"Когда: {picked_str} MSK\n"
             f"Добавить в календарь: {gcal}\n"
-            "Ссылку на созвон отправит интервьюер после создания встречи в Telemost.",
+            "Интервьюер пришлет ссылку на созвон отдельным сообщением.",
             reply_markup=start_only_keyboard(session_row.id),
         )
     except Exception:
@@ -860,11 +869,9 @@ async def proposal_confirm(callback: CallbackQuery):
             f"Кандидат: {candidate_nick}\n"
             f"session_id={session_row.id}\n"
             f"Добавить в календарь: {gcal}\n\n"
-            "Создай встречу в Telemost и ОТВЕТЬ на это сообщение ссылкой — бот перешлёт её кандидату.\n\n"
+            "Сначала создай встречу в Telemost и ОТВЕТЬ на это сообщение ссылкой — бот перешлёт её кандидату.\n\n"
             "Вопросы для собеса:\n"
             f"{set_item2.questions_text if set_item2 else 'n/a'}\n\n"
-            "Гайд оценки для собеседующего:\n"
-            f"{interviewer_rubric_text(session_row.track_code)}\n\n"
             "Можно запустить собес кнопкой ниже.",
             reply_markup=start_only_keyboard(session_row.id),
         )
@@ -940,11 +947,9 @@ async def session_start(callback: CallbackQuery, state: FSMContext):
     extra = ""
     if role == "candidate":
         extra = "\n\n" + candidate_feedback_guide()
-    else:
-        extra = "\n\nГайд оценки для собеседующего:\n" + interviewer_rubric_text(s.track_code)
 
     await callback.message.answer(
-        f"Ссылка на telemost: {s.meeting_url}\n\n"
+        f"Ссылка на созвон: {s.meeting_url}\n\n"
         "После собеса заполни форму: поставь оценку 0-3"
         f"{extra}"
     )
