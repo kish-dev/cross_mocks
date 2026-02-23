@@ -23,7 +23,7 @@ from app.bot.keyboards.common import (
     start_session_keyboard,
     start_only_keyboard,
 )
-from app.services.scheduling import extract_datetime_slots, can_confirm_slot
+from app.services.scheduling import extract_datetime_slots, can_confirm_slot, normalize_datetime_input
 from app.services.sheets_sink import sheets_sink
 from app.services.notifications import build_time_proposal_payload
 
@@ -808,11 +808,19 @@ async def proposal_start_propose(callback: CallbackQuery, state: FSMContext):
 @router.message(ProposalFlow.waiting_final_time)
 async def proposal_receive_final_time(message: Message, state: FSMContext):
     raw = (message.text or "").strip()
-    try:
-        dt = datetime.strptime(raw, "%Y-%m-%d %H:%M")
-    except ValueError:
-        await message.answer("Неверный формат. Используй YYYY-MM-DD HH:MM")
+    normalized = normalize_datetime_input(raw)
+    if not normalized:
+        await message.answer(
+            "Неверный формат времени.\n"
+            "Поддерживаются форматы:\n"
+            "- YYYY-MM-DD HH:MM\n"
+            "- DD.MM.YYYY HH:MM\n"
+            "- DD.MM HH:MM\n"
+            "Все время в MSK."
+        )
         return
+
+    dt = datetime.strptime(normalized, "%Y-%m-%d %H:%M")
 
     data = await state.get_data()
     proposal_id = data.get("proposal_id")
@@ -835,7 +843,7 @@ async def proposal_receive_final_time(message: Message, state: FSMContext):
             await message.answer("Не удалось найти участников")
             return
 
-        proposal.options_json = {**(proposal.options_json or {}), "final_time": raw}
+        proposal.options_json = {**(proposal.options_json or {}), "final_time": normalized}
         await session.commit()
 
     from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -851,7 +859,7 @@ async def proposal_receive_final_time(message: Message, state: FSMContext):
         message.bot,
         student.tg_user_id,
         "Интервьюер предложил итоговое время:\n"
-        f"{raw} MSK\n"
+        f"{normalized} MSK\n"
         "Подтверди слот:",
         reply_markup=kb.as_markup(),
     )

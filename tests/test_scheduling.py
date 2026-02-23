@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from app.services.scheduling import extract_datetime_slots, can_confirm_slot
+from app.services.scheduling import extract_datetime_slots, can_confirm_slot, normalize_datetime_input
 
 
 def test_extract_datetime_slots_parses_multiple():
@@ -22,3 +22,11 @@ def test_can_confirm_slot():
     assert can_confirm_slot("pending", "2026-02-25 19:00") is True
     assert can_confirm_slot("accepted", "2026-02-25 19:00") is False
     assert can_confirm_slot("pending", None) is False
+
+
+def test_normalize_datetime_input_variants():
+    assert normalize_datetime_input("2026-03-01 19:30") == "2026-03-01 19:30"
+    assert normalize_datetime_input("01.03.2026 19:30") == "2026-03-01 19:30"
+    out = normalize_datetime_input("01.03 19:30")
+    assert out.endswith("-03-01 19:30")
+    assert normalize_datetime_input("tomorrow evening") is None
