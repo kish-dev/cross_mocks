@@ -307,6 +307,7 @@ async def pass_track(callback: CallbackQuery, state: FSMContext):
 
         never_had = []
         had_other_topic = []
+        had_same_topic = []
 
         for candidate in candidates:
             pair_sessions = (
@@ -323,15 +324,18 @@ async def pass_track(callback: CallbackQuery, state: FSMContext):
                 continue
 
             had_same_track = any(t == track for t, _ in pair_sessions)
-            if not had_same_track:
+            if had_same_track:
+                had_same_topic.append(candidate)
+            else:
                 had_other_topic.append(candidate)
 
         # топ-5 в каждой категории
         top_never = never_had[:5]
         top_other = had_other_topic[:5]
+        top_same = had_same_topic[:5]
 
-        if not top_never and not top_other:
-            await callback.message.answer("По этой теме нет кандидатов под условия топов. Попробуй позже.")
+        if not top_never and not top_other and not top_same:
+            await callback.message.answer("По этой теме нет доступных кандидатов. Попробуй позже.")
             await callback.answer()
             return
 
@@ -344,8 +348,11 @@ async def pass_track(callback: CallbackQuery, state: FSMContext):
     if top_other:
         for u in top_other:
             kb.button(text=f"🔁 @{u.username or u.id} (другая тема)", callback_data=f"pass_pick:{track}:{u.id}")
+    if top_same:
+        for u in top_same:
+            kb.button(text=f"⚠️ @{u.username or u.id} (уже был собес по этой теме)", callback_data=f"pass_pick:{track}:{u.id}")
 
-    pool_ids = [u.id for u in top_never + top_other]
+    pool_ids = [u.id for u in top_never + top_other + top_same]
     await state.update_data(track=track, candidate_pool=pool_ids)
     kb.button(text="🎲 Выбрать случайного", callback_data=f"pass_random:{track}")
     kb.adjust(1)
@@ -353,7 +360,8 @@ async def pass_track(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         "Выбери кандидата для собеса:\n"
         "— сначала топ-5, с кем ещё не было собеса\n"
-        "— затем топ-5, с кем был собес на другой теме",
+        "— затем топ-5, с кем был собес на другой теме\n"
+        "— ⚠️ также показываем тех, с кем уже был собес по этой теме (проводить можно)",
         reply_markup=kb.as_markup(),
     )
     await callback.answer()
