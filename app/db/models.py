@@ -56,7 +56,7 @@ class Session(Base):
     interviewer_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     student_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     track_code: Mapped[str] = mapped_column(String(32))
-    pack_id: Mapped[int] = mapped_column(ForeignKey("task_packs.id"))
+    pack_id: Mapped[int] = mapped_column(ForeignKey("candidate_sets.id"))
     starts_at: Mapped[datetime] = mapped_column(DateTime)
     ends_at: Mapped[datetime] = mapped_column(DateTime)
     meeting_url: Mapped[str | None] = mapped_column(Text, nullable=True)
