@@ -56,4 +56,11 @@ def start_session_keyboard(session_id: int) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def start_only_keyboard(session_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="▶️ Пройти собес", callback_data=f"session:start:{session_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 # removed: resubmit button flow in favor of direct reply flow

@@ -21,6 +21,7 @@ from app.bot.keyboards.common import (
     track_keyboard,
     evaluation_keyboard,
     start_session_keyboard,
+    start_only_keyboard,
 )
 from app.services.scheduling import extract_datetime_slots, can_confirm_slot
 from app.services.sheets_sink import sheets_sink
@@ -44,6 +45,51 @@ def to_gcal_link(title: str, details: str, start_dt: datetime, end_dt: datetime)
         "dates": f"{start_dt.strftime(fmt)}/{end_dt.strftime(fmt)}",
     }
     return f"https://calendar.google.com/calendar/render?{urlencode(params)}"
+
+
+def interviewer_rubric_text(track_code: str) -> str:
+    common = (
+        "Общая шкала 0–3:\n"
+        "0 — провал; 1 — слабо; 2 — нормально (middle); 3 — отлично (senior).\n"
+        "Правило честности: если сомневаешься между 1 и 2 — ставь 1."
+    )
+    if track_code == "theory":
+        specifics = (
+            "Theory:\n"
+            "0 — не знает/путается; 1 — знает определения без применения;\n"
+            "2 — корректно с подсказками; 3 — объясняет, дает пример из практики, отвечает на уточнения.\n"
+            "Важно: без примера из опыта максимум 2."
+        )
+    elif track_code == "livecoding":
+        specifics = (
+            "Livecoding:\n"
+            "0 — не может начать; 1 — теряется; 2 — решает с 1–2 подсказками; 3 — решает самостоятельно и проговаривает ход мыслей.\n"
+            "Минусы: молчание, попытка писать идеально, отсутствие объяснений."
+        )
+    elif track_code == "sysdesign":
+        specifics = (
+            "System-design:\n"
+            "0 — хаос без структуры; 1 — куски идей; 2 — структура, но слабые аргументы; 3 — структура + компромиссы.\n"
+            "Если кандидат не задает уточняющие вопросы — минус 1 к итогу."
+        )
+    else:
+        specifics = (
+            "Final:\n"
+            "Оцени 2 блока 0–3: (1) как рассказал о себе, (2) глубина пояснений по опыту."
+        )
+
+    summary = (
+        "Итоговая интерпретация по среднему: 2.5–3.0 готов к рынку; 2.0–2.4 доработать; <2.0 рано."
+    )
+    return f"{common}\n\n{specifics}\n\n{summary}"
+
+
+def candidate_feedback_guide() -> str:
+    return (
+        "Оцени качество собеса как кандидат (0–3):\n"
+        "0 — бесполезно/токсично; 1 — слабо структурировано; 2 — полезно и корректно; 3 — очень полезно, четкий фидбек и комфортное общение.\n"
+        "Отдельно в комментарии: что было полезно и что улучшить по коммуникации."
+    )
 
 
 WELCOME = (
@@ -752,7 +798,7 @@ async def proposal_confirm(callback: CallbackQuery):
             f"Когда: {picked_str} MSK\n"
             f"Добавить в календарь: {gcal}\n"
             "Можно запустить сразу кнопкой ниже, даже если до старта < 15 минут.",
-            reply_markup=start_session_keyboard(session_row.id),
+            reply_markup=start_only_keyboard(session_row.id),
         )
     except Exception:
         pass
@@ -769,8 +815,10 @@ async def proposal_confirm(callback: CallbackQuery):
             f"Добавить в календарь: {gcal}\n\n"
             "Вопросы для собеса:\n"
             f"{set_item2.questions_text if set_item2 else 'n/a'}\n\n"
-            "Можно запустить сразу кнопкой ниже, даже если до старта < 15 минут.",
-            reply_markup=start_session_keyboard(session_row.id),
+            "Гайд оценки для собеседующего:\n"
+            f"{interviewer_rubric_text(session_row.track_code)}\n\n"
+            "Можно запустить собес кнопкой ниже.",
+            reply_markup=start_only_keyboard(session_row.id),
         )
     except Exception:
         pass
@@ -843,9 +891,14 @@ async def session_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(SessionClosureFlow.waiting_score)
     await state.update_data(session_id=session_id, role=role)
 
+    extra = ""
+    if role == "candidate":
+        extra = "\n\n" + candidate_feedback_guide()
+
     await callback.message.answer(
         f"Ссылка на telemost: {s.meeting_url}\n\n"
         "После собеса заполни форму: поставь оценку 0-3"
+        f"{extra}"
     )
     await callback.answer()
 
