@@ -1,6 +1,7 @@
 import re
 
 from aiogram import F, Router
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
@@ -112,12 +113,10 @@ async def submit_pack_content(message: Message, state: FSMContext):
     await message.answer("Отправил набор на проверку админу ✅")
 
 
-@router.message(F.reply_to_message)
+@router.message(StateFilter(None), F.reply_to_message)
 async def resubmit_via_reply(message: Message, state: FSMContext):
     reply_text = ((message.reply_to_message.text or "") + "\n" + (message.reply_to_message.caption or "")).strip()
     m = re.search(r"set_id=(\d+)", reply_text)
-
-    await state.clear()
 
     content = (message.text or message.caption or "").strip()
     if not content:
@@ -152,7 +151,7 @@ async def resubmit_via_reply(message: Message, state: FSMContext):
         if not set_item:
             await message.answer(
                 "Не нашёл набор в статусе правок.\n"
-                "Ответь именно на сообщение бота с правками или попроси админа заново отправить правки."
+                "Ответь на сообщение бота с правками или отправь обычным сообщением исправленный набор."
             )
             return
 
@@ -273,7 +272,7 @@ async def admin_submission_comment(message: Message, state: FSMContext):
             "По твоему набору нужны правки ✏️\n"
             f"set_id={submission_id}\n"
             f"Комментарий админа:\n{comment}\n\n"
-            "Просто ответь на это сообщение одним сообщением (ссылкой или текстом исправленного набора), и я отправлю на повторную проверку админу."
+            "Отправь исправленный набор одним сообщением (reply-ответом или обычным сообщением в чат), и я отправлю его на повторную проверку админу."
         )
 
     await state.clear()

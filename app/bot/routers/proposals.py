@@ -38,6 +38,136 @@ def _looks_like_feedback_text(text: str) -> bool:
     return bool(re.search(r"(итог|оцен|балл|фидбек|\d+[,.]\d+)", normalized))
 
 
+async def _schedule_session_from_proposal(
+    proposal_id: int,
+    selected_pack_id: int | None = None,
+) -> tuple[Session | None, User | None, User | None, CandidateSet | None, datetime | None, datetime | None, str | None, str | None]:
+    async with SessionLocal() as session:
+        proposal = (await session.execute(select(InterviewProposal).where(InterviewProposal.id == proposal_id))).scalar_one_or_none()
+        picked_str = ((proposal.options_json or {}).get("final_time") if proposal else None)
+        if not proposal:
+            return None, None, None, None, None, None, None, "Заявка не найдена"
+        if not can_confirm_slot(proposal.status, picked_str):
+            return None, None, None, None, None, None, None, "Слот не выбран или заявка уже обработана"
+
+        try:
+            starts_at = datetime.strptime(picked_str, "%Y-%m-%d %H:%M")
+        except ValueError:
+            return None, None, None, None, None, None, None, "Некорректное время"
+        ends_at = starts_at + timedelta(minutes=settings.DEFAULT_DURATION_MIN)
+
+        interviewer = (await session.execute(select(User).where(User.id == proposal.interviewer_id))).scalar_one_or_none()
+        student = (await session.execute(select(User).where(User.id == proposal.student_id))).scalar_one_or_none()
+        if not interviewer or not student:
+            return None, None, None, None, None, None, None, "Пользователь не найден"
+
+        target_pack_id = selected_pack_id or proposal.pack_id
+        set_item = (
+            await session.execute(
+                select(CandidateSet).where(
+                    CandidateSet.id == target_pack_id,
+                    CandidateSet.owner_user_id == interviewer.id,
+                    CandidateSet.track_code == proposal.track_code,
+                    CandidateSet.status == "approved",
+                )
+            )
+        ).scalar_one_or_none()
+        if not set_item:
+            return None, None, None, None, None, None, None, "Набор не найден или недоступен"
+
+        session_row = Session(
+            interviewer_id=interviewer.id,
+            student_id=student.id,
+            track_code=proposal.track_code,
+            pack_id=set_item.id,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            meeting_url=settings.TELEMOST_URL,
+            status="scheduled",
+        )
+        session.add(session_row)
+        proposal.pack_id = set_item.id
+        proposal.status = "accepted"
+
+        a, b = sorted((student.id, interviewer.id))
+        pair = (await session.execute(select(PairStats).where(PairStats.user_a_id == a, PairStats.user_b_id == b))).scalar_one_or_none()
+        if not pair:
+            pair = PairStats(user_a_id=a, user_b_id=b, interviews_count=0)
+            session.add(pair)
+        pair.interviews_count += 1
+        pair.last_interview_at = utcnow()
+
+        await session.commit()
+        await session.refresh(session_row)
+
+        return session_row, interviewer, student, set_item, starts_at, ends_at, picked_str, None
+
+
+async def _notify_scheduled_session(
+    callback: CallbackQuery,
+    session_row: Session,
+    interviewer: User,
+    student: User,
+    set_item: CandidateSet | None,
+    starts_at: datetime,
+    ends_at: datetime,
+    picked_str: str,
+):
+    sheets_sink.send(
+        "session_scheduled",
+        {
+            "session_id": session_row.id,
+            "track": session_row.track_code,
+            "starts_at": starts_at.isoformat(),
+            "ends_at": ends_at.isoformat(),
+            "student_tg_user_id": student.tg_user_id,
+            "interviewer_tg_user_id": interviewer.tg_user_id,
+            "meeting_url": session_row.meeting_url,
+            "timezone": "MSK",
+        },
+    )
+
+    details = f"Собес по теме {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}. Telemost: {session_row.meeting_url}"
+    gcal = to_gcal_link(
+        title=f"Mock interview: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}",
+        details=details,
+        start_dt=starts_at,
+        end_dt=ends_at,
+    )
+
+    try:
+        await callback.bot.send_message(
+            student.tg_user_id,
+            "Собес назначен ✅\n"
+            f"Тема: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}\n"
+            f"Когда: {picked_str} MSK\n"
+            f"Добавить в календарь: {gcal}\n"
+            "Интервьюер пришлет ссылку на созвон отдельным сообщением.",
+            reply_markup=start_only_keyboard(session_row.id),
+        )
+    except Exception:
+        pass
+
+    candidate_nick = f"@{student.username}" if student.username else f"id:{student.tg_user_id}"
+    try:
+        await callback.bot.send_message(
+            interviewer.tg_user_id,
+            "Собес назначен ✅\n"
+            f"Тема: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}\n"
+            f"Когда: {picked_str} MSK\n"
+            f"Кандидат: {candidate_nick}\n"
+            f"session_id={session_row.id}\n"
+            f"Добавить в календарь: {gcal}\n\n"
+            "Создай встречу в Telemost и отправь ссылку reply-ответом или обычным сообщением — бот перешлёт её кандидату.\n\n"
+            "Вопросы для собеса:\n"
+            f"{set_item.questions_text if set_item else 'n/a'}\n\n"
+            "Можно запустить собес кнопкой ниже.",
+            reply_markup=start_only_keyboard(session_row.id),
+        )
+    except Exception:
+        pass
+
+
 @router.callback_query(F.data.startswith("pass_track:"))
 async def pass_track(callback: CallbackQuery, state: FSMContext):
     async with SessionLocal() as session:
@@ -591,89 +721,101 @@ async def proposal_confirm(callback: CallbackQuery):
             await callback.answer("Это подтверждает кандидат", show_alert=True)
             return
 
-        ends_at = starts_at + timedelta(minutes=settings.DEFAULT_DURATION_MIN)
+        approved_sets = (
+            await session.execute(
+                select(CandidateSet.id, CandidateSet.title)
+                .where(
+                    CandidateSet.owner_user_id == interviewer.id,
+                    CandidateSet.track_code == proposal.track_code,
+                    CandidateSet.status == "approved",
+                )
+                .order_by(CandidateSet.updated_at.desc())
+                .limit(20)
+            )
+        ).all()
 
-        session_row = Session(
-            interviewer_id=interviewer.id,
-            student_id=student.id,
-            track_code=proposal.track_code,
-            pack_id=proposal.pack_id,
-            starts_at=starts_at,
-            ends_at=ends_at,
-            meeting_url=settings.TELEMOST_URL,
-            status="scheduled",
+    if len(approved_sets) > 1:
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+        kb = InlineKeyboardBuilder()
+        for set_id, title in approved_sets:
+            mark = "✅ " if set_id == proposal.pack_id else ""
+            kb.button(text=f"{mark}{title[:40]}", callback_data=f"proposal:pick_set:{proposal_id}:{set_id}")
+        kb.adjust(1)
+
+        ok, err = await safe_send(
+            callback.bot,
+            interviewer.tg_user_id,
+            "Кандидат подтвердил слот.\n"
+            f"Когда: {picked_str} MSK\n\n"
+            "Выбери набор вопросов для этого собеса:",
+            reply_markup=kb.as_markup(),
         )
-        session.add(session_row)
-        proposal.status = "accepted"
+        await callback.message.answer("Слот подтвержден ✅ Ожидаем, пока интервьюер выберет набор для собеса.")
+        await callback.answer()
+        if not ok:
+            await callback.message.answer(
+                "Не удалось запросить выбор набора у интервьюера.\n"
+                f"Техдеталь: {err}"
+            )
+        return
 
-        a, b = sorted((student.id, interviewer.id))
-        pair = (await session.execute(select(PairStats).where(PairStats.user_a_id == a, PairStats.user_b_id == b))).scalar_one_or_none()
-        if not pair:
-            pair = PairStats(user_a_id=a, user_b_id=b, interviews_count=0)
-            session.add(pair)
-        pair.interviews_count += 1
-        pair.last_interview_at = utcnow()
-
-        await session.commit()
-        await session.refresh(session_row)
-
-    sheets_sink.send(
-        "session_scheduled",
-        {
-            "session_id": session_row.id,
-            "track": session_row.track_code,
-            "starts_at": starts_at.isoformat(),
-            "ends_at": ends_at.isoformat(),
-            "student_tg_user_id": student.tg_user_id,
-            "interviewer_tg_user_id": interviewer.tg_user_id,
-            "meeting_url": session_row.meeting_url,
-            "timezone": "MSK",
-        },
+    selected_pack_id = approved_sets[0][0] if approved_sets else None
+    session_row, interviewer, student, set_item, starts_at, ends_at, picked_str, err = await _schedule_session_from_proposal(
+        proposal_id=proposal_id,
+        selected_pack_id=selected_pack_id,
     )
+    if err or not session_row or not interviewer or not student or not starts_at or not ends_at or not picked_str:
+        await callback.answer(err or "Не удалось назначить собес", show_alert=True)
+        return
 
     await callback.message.answer(f"Слот подтвержден: {picked_str} ✅")
     await callback.answer()
-
-    details = f"Собес по теме {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}. Telemost: {session_row.meeting_url}"
-    gcal = to_gcal_link(
-        title=f"Mock interview: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}",
-        details=details,
-        start_dt=starts_at,
-        end_dt=ends_at,
+    await _notify_scheduled_session(
+        callback=callback,
+        session_row=session_row,
+        interviewer=interviewer,
+        student=student,
+        set_item=set_item,
+        starts_at=starts_at,
+        ends_at=ends_at,
+        picked_str=picked_str,
     )
 
-    try:
-        await callback.bot.send_message(
-            student.tg_user_id,
-            "Собес назначен ✅\n"
-            f"Тема: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}\n"
-            f"Когда: {picked_str} MSK\n"
-            f"Добавить в календарь: {gcal}\n"
-            "Интервьюер пришлет ссылку на созвон отдельным сообщением.",
-            reply_markup=start_only_keyboard(session_row.id),
-        )
-    except Exception:
-        pass
 
-    try:
-        async with SessionLocal() as session2:
-            set_item2 = (await session2.execute(select(CandidateSet).where(CandidateSet.id == session_row.pack_id))).scalar_one_or_none()
+@router.callback_query(F.data.startswith("proposal:pick_set:"))
+async def proposal_pick_set(callback: CallbackQuery):
+    _, _, proposal_id_raw, set_id_raw = callback.data.split(":", 3)
+    proposal_id = int(proposal_id_raw)
+    selected_set_id = int(set_id_raw)
 
-        candidate_nick = f"@{student.username}" if student.username else f"id:{student.tg_user_id}"
+    async with SessionLocal() as session:
+        proposal = (await session.execute(select(InterviewProposal).where(InterviewProposal.id == proposal_id))).scalar_one_or_none()
+        if not proposal:
+            await callback.answer("Заявка не найдена", show_alert=True)
+            return
+        interviewer = (await session.execute(select(User).where(User.id == proposal.interviewer_id))).scalar_one_or_none()
+        if not interviewer or callback.from_user.id != interviewer.tg_user_id:
+            await callback.answer("Только интервьюер может выбрать набор", show_alert=True)
+            return
 
-        await callback.bot.send_message(
-            interviewer.tg_user_id,
-            "Собес назначен ✅\n"
-            f"Тема: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}\n"
-            f"Когда: {picked_str} MSK\n"
-            f"Кандидат: {candidate_nick}\n"
-            f"session_id={session_row.id}\n"
-            f"Добавить в календарь: {gcal}\n\n"
-            "Сначала создай встречу в Telemost и ОТВЕТЬ на это сообщение ссылкой — бот перешлёт её кандидату.\n\n"
-            "Вопросы для собеса:\n"
-            f"{set_item2.questions_text if set_item2 else 'n/a'}\n\n"
-            "Можно запустить собес кнопкой ниже.",
-            reply_markup=start_only_keyboard(session_row.id),
-        )
-    except Exception:
-        pass
+    session_row, interviewer, student, set_item, starts_at, ends_at, picked_str, err = await _schedule_session_from_proposal(
+        proposal_id=proposal_id,
+        selected_pack_id=selected_set_id,
+    )
+    if err or not session_row or not interviewer or not student or not starts_at or not ends_at or not picked_str:
+        await callback.answer(err or "Не удалось назначить собес", show_alert=True)
+        return
+
+    await callback.message.answer("Набор выбран. Собес назначен ✅")
+    await callback.answer()
+    await _notify_scheduled_session(
+        callback=callback,
+        session_row=session_row,
+        interviewer=interviewer,
+        student=student,
+        set_item=set_item,
+        starts_at=starts_at,
+        ends_at=ends_at,
+        picked_str=picked_str,
+    )

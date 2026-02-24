@@ -29,6 +29,11 @@ from app.services.review_guards import (
 
 router = Router()
 
+
+def message_context_text(message: Message) -> str:
+    return ((message.text or "") + "\n" + (message.caption or "")).strip()
+
+
 def reply_context_text(message: Message) -> str:
     reply = message.reply_to_message
     if not reply:
@@ -36,13 +41,23 @@ def reply_context_text(message: Message) -> str:
     return ((reply.text or "") + "\n" + (reply.caption or "")).strip()
 
 
+def extract_session_id(text: str) -> int | None:
+    match = re.search(r"session_id=(\d+)", text)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
 def has_session_id_in_reply(message: Message) -> bool:
-    return bool(re.search(r"session_id=(\d+)", reply_context_text(message)))
+    return extract_session_id(reply_context_text(message)) is not None
+
+
+def has_session_id_in_message(message: Message) -> bool:
+    return extract_session_id(message_context_text(message)) is not None
 
 
 def has_message_url(message: Message) -> bool:
-    content = (message.text or message.caption or "").strip()
-    return bool(re.search(r"https?://\S+", content))
+    return bool(re.search(r"https?://\S+", message_context_text(message)))
 
 
 def candidate_feedback_guide_with_session(session_id: int) -> str:
@@ -85,16 +100,11 @@ async def start_cmd(message: Message):
     await message.answer(WELCOME, reply_markup=main_menu_keyboard(is_admin=is_admin))
 
 
-@router.message(F.reply_to_message, has_session_id_in_reply)
-async def meeting_link_via_reply(message: Message, state: FSMContext):
-    reply_text = reply_context_text(message)
-    m = re.search(r"session_id=(\d+)", reply_text)
-    if not m:
-        return
-
-    session_id = int(m.group(1))
-    content = (message.text or message.caption or "").strip()
+async def _handle_session_context_message(message: Message, session_id: int):
+    content = message_context_text(message)
     url_match = re.search(r"https?://\S+", content)
+    me = None
+    s = None
 
     async with SessionLocal() as session:
         me = (await session.execute(select(User).where(User.tg_user_id == message.from_user.id))).scalar_one_or_none()
@@ -135,7 +145,7 @@ async def meeting_link_via_reply(message: Message, state: FSMContext):
                 pass
             return
 
-        # 2) Participant sends feedback by reply with session_id (fallback, no FSM required)
+        # 2) Participant sends feedback with session_id (reply or plain message)
         if me.id in {s.student_id, s.interviewer_id} and content:
             parsed_score = parse_feedback_score(content)
             if parsed_score is None:
@@ -175,16 +185,34 @@ async def meeting_link_via_reply(message: Message, state: FSMContext):
             )
             return
 
-    # if it is reply to session but not valid action
+    # If there is URL but sender is not interviewer of this session
     if url_match and me and s and me.id != s.interviewer_id:
         await message.answer("Ссылку на созвон может отправить только интервьюер.")
 
 
+@router.message(F.reply_to_message, has_session_id_in_reply)
+async def meeting_link_via_reply(message: Message):
+    session_id = extract_session_id(reply_context_text(message))
+    if session_id is None:
+        return
+    await _handle_session_context_message(message, session_id)
+
+
+@router.message(StateFilter(None), has_session_id_in_message)
+async def meeting_link_via_plain_session_marker(message: Message):
+    session_id = extract_session_id(message_context_text(message))
+    if session_id is None:
+        return
+    await _handle_session_context_message(message, session_id)
+
+
 def looks_like_feedback_text(message: Message) -> bool:
-    content = (message.text or message.caption or "").strip().lower()
+    content = message_context_text(message).lower()
     if not content:
         return False
     if content.startswith("/"):
+        return False
+    if extract_session_id(content) is not None:
         return False
     if re.search(r"https?://\S+", content):
         return False
@@ -193,7 +221,7 @@ def looks_like_feedback_text(message: Message) -> bool:
 
 @router.message(StateFilter(None), looks_like_feedback_text)
 async def feedback_without_reply(message: Message):
-    content = (message.text or message.caption or "").strip()
+    content = message_context_text(message)
     parsed_score = parse_feedback_score(content)
     if parsed_score is None:
         await message.answer(
@@ -266,7 +294,7 @@ async def meeting_link_without_reply(message: Message, state: FSMContext):
     if current_state is not None:
         return
 
-    content = (message.text or message.caption or "").strip()
+    content = message_context_text(message)
     if not content:
         return
 
@@ -344,4 +372,3 @@ async def find_interviewer(callback: CallbackQuery):
         return
     await callback.message.answer("Выбери тему собеса, который хочешь пройти:", reply_markup=track_keyboard("pass_track"))
     await callback.answer()
-

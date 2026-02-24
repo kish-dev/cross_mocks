@@ -7,6 +7,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from app.bot.routers.start import (
     candidate_feedback_guide_with_session,
     has_message_url,
+    has_session_id_in_message,
     has_session_id_in_reply,
     interviewer_rubric_with_session,
     looks_like_feedback_text,
@@ -14,9 +15,16 @@ from app.bot.routers.start import (
 )
 
 
-def _msg(reply_text: str | None = None, reply_caption: str | None = None):
+def _msg(
+    reply_text: str | None = None,
+    reply_caption: str | None = None,
+    text: str | None = None,
+    caption: str | None = None,
+):
     return SimpleNamespace(
         reply_to_message=SimpleNamespace(text=reply_text, caption=reply_caption),
+        text=text,
+        caption=caption,
     )
 
 
@@ -35,17 +43,23 @@ def test_has_session_id_in_reply_false_without_marker():
     assert has_session_id_in_reply(m) is False
 
 
+def test_has_session_id_in_message_detects_marker():
+    m = _msg(text="Итог: 2.5\nsession_id=77")
+    assert has_session_id_in_message(m) is True
+
+
+def test_has_session_id_in_message_false_without_marker():
+    m = _msg(text="Итог: 2.5")
+    assert has_session_id_in_message(m) is False
+
+
 def test_has_message_url_detects_link():
-    m = _msg()
-    m.text = "check https://example.com"
-    m.caption = None
+    m = _msg(text="check https://example.com")
     assert has_message_url(m) is True
 
 
 def test_has_message_url_false_for_plain_text():
-    m = _msg("plain text")
-    m.text = "hello world"
-    m.caption = None
+    m = _msg("plain text", text="hello world")
     assert has_message_url(m) is False
 
 
@@ -55,10 +69,11 @@ def test_guides_include_session_id_marker():
 
 
 def test_looks_like_feedback_text_filter():
-    m = _msg()
-    m.caption = None
-    m.text = "Итого 2,5"
+    m = _msg(text="Итого 2,5")
     assert looks_like_feedback_text(m) is True
+
+    m.text = "Итого 2,5 session_id=77"
+    assert looks_like_feedback_text(m) is False
 
     m.text = "https://example.com"
     assert looks_like_feedback_text(m) is False

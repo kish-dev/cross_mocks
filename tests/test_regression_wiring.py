@@ -43,8 +43,35 @@ def test_submission_approve_sends_continue_cta_to_student():
 def test_start_router_has_plain_feedback_handler():
     data = _read("app/bot/routers/start.py")
     assert "async def feedback_without_reply" in data
+    assert "async def meeting_link_via_plain_session_marker" in data
+    assert "has_session_id_in_message" in data
     assert "looks_like_feedback_text" in data
     assert "continue_message_text()" in data
+
+
+def test_submissions_copy_and_handlers_allow_non_reply_resubmit():
+    data = _read("app/bot/routers/submissions.py")
+    assert "async def resubmit_via_reply" in data
+    assert "async def auto_resubmit_latest_changes" in data
+    assert "@router.message(StateFilter(None), F.reply_to_message)" in data
+    assert "reply-ответом или обычным сообщением в чат" in data
+
+
+def test_session_start_now_copy_mentions_plain_message_option():
+    data = _read("app/bot/routers/sessions.py")
+    assert "reply-сообщением или обычным сообщением в чат" in data
+
+
+def test_proposal_scheduled_message_does_not_use_old_telemost_phrase():
+    data = _read("app/bot/routers/proposals.py")
+    assert "Сначала создай встречу в Telemost" not in data
+    assert "Создай встречу в Telemost и отправь ссылку reply-ответом или обычным сообщением" in data
+
+
+def test_proposal_has_interviewer_set_pick_flow():
+    data = _read("app/bot/routers/proposals.py")
+    assert "proposal:pick_set:" in data
+    assert "Выбери набор вопросов для этого собеса" in data
 
 
 def test_find_actions_are_blocked_by_pending_interviewer_review_guard():
