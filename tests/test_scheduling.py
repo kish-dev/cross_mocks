@@ -1,9 +1,10 @@
 import sys
 from pathlib import Path
+from datetime import datetime, timedelta
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from app.services.scheduling import extract_datetime_slots, can_confirm_slot, normalize_datetime_input
+from app.services.scheduling import extract_datetime_slots, can_confirm_slot, normalize_datetime_input, is_future_slot
 
 
 def test_extract_datetime_slots_parses_multiple():
@@ -30,3 +31,11 @@ def test_normalize_datetime_input_variants():
     out = normalize_datetime_input("01.03 19:30")
     assert out.endswith("-03-01 19:30")
     assert normalize_datetime_input("tomorrow evening") is None
+
+
+def test_is_future_slot():
+    now = datetime(2026, 2, 24, 12, 0)
+    future = (now + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
+    past = (now - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
+    assert is_future_slot(future, now=now) is True
+    assert is_future_slot(past, now=now) is False

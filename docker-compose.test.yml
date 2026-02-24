@@ -1,0 +1,27 @@
+services:
+  db_test:
+    image: postgres:16
+    container_name: tgmocks-db-test
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tgmocks_test
+    volumes:
+      - db_test_data:/var/lib/postgresql/data
+
+  redis_test:
+    image: redis:7
+    container_name: tgmocks-redis-test
+
+  bot_test:
+    build: .
+    container_name: tgmocks-bot-test
+    env_file: .env.test
+    depends_on:
+      - db_test
+      - redis_test
+    command: sh -c "python -c 'import asyncio; from app.db.session import init_db; asyncio.run(init_db())' && pytest -q"
+
+volumes:
+  db_test_data:
+    name: tgmocks_test_db_data

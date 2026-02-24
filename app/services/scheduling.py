@@ -2,6 +2,8 @@ import re
 from datetime import datetime
 from typing import List
 
+from app.utils.time import utcnow
+
 
 SLOT_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\b")
 
@@ -34,7 +36,7 @@ def normalize_datetime_input(text: str, now: datetime | None = None) -> str | No
     m2 = re.fullmatch(r"(\d{2})\.(\d{2})\s+(\d{2}:\d{2})", t)
     if m2:
         d, mo, hm = m2.groups()
-        year = (now or datetime.utcnow()).year
+        year = (now or utcnow()).year
         return f"{year}-{mo}-{d} {hm}"
 
     return None
@@ -42,3 +44,11 @@ def normalize_datetime_input(text: str, now: datetime | None = None) -> str | No
 
 def can_confirm_slot(proposal_status: str, final_time: str | None) -> bool:
     return proposal_status == "pending" and bool(final_time)
+
+
+def is_future_slot(slot: str, now: datetime | None = None) -> bool:
+    try:
+        dt = datetime.strptime(slot, "%Y-%m-%d %H:%M")
+    except ValueError:
+        return False
+    return dt > (now or utcnow())

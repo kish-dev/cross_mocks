@@ -1,10 +1,10 @@
 import json
 import os
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from app.config import settings
+from app.utils.time import utcnow
 
 
 class SheetsSink:
@@ -20,7 +20,7 @@ class SheetsSink:
 
     def send(self, event_type: str, payload: dict[str, Any]) -> bool:
         envelope = {
-            "ts": datetime.utcnow().isoformat(),
+            "ts": utcnow().isoformat(),
             "event_type": event_type,
             "payload": payload,
             "sheet_id": settings.GOOGLE_SHEET_ID,

@@ -1,6 +1,6 @@
-from datetime import datetime
 from sqlalchemy import select
 from app.db.models import User, PairStats
+from app.utils.time import utcnow
 
 
 class MatchingService:
@@ -11,7 +11,7 @@ class MatchingService:
     async def rank_candidates(self, session, requester_id: int) -> list[int]:
         users = (await session.execute(select(User).where(User.is_active.is_(True), User.id != requester_id))).scalars().all()
         scored: list[tuple[tuple[int, float], int]] = []
-        now = datetime.utcnow()
+        now = utcnow()
         for u in users:
             a, b = self.pair_key(requester_id, u.id)
             ps = (await session.execute(select(PairStats).where(PairStats.user_a_id == a, PairStats.user_b_id == b))).scalar_one_or_none()

@@ -1,7 +1,7 @@
-version: '3.9'
 services:
   db:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -11,6 +11,7 @@ services:
 
   redis:
     image: redis:7
+    restart: unless-stopped
 
   bot:
     build: .
@@ -19,7 +20,8 @@ services:
       - db
       - redis
     restart: unless-stopped
-    command: sh -c "alembic stamp 0001_baseline && python -m app.main"
+    command: python -m app.main
 
 volumes:
   db_data:
+    name: tgmocks_db_data
