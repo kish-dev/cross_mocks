@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.bot.middlewares.access import AccessMiddleware
-from app.bot.routers import admin_stats, evaluations, proposals, sessions, start, stats, submissions
+from app.bot.routers import admin_stats, proposals, sessions, start, stats, submissions
 from app.bot.keyboards.common import start_session_keyboard
 from app.db.session import SessionLocal
 from app.db.models import Session, User
@@ -168,7 +168,6 @@ async def main() -> None:
     dp.include_router(start.router)
     dp.include_router(proposals.router)
     dp.include_router(sessions.router)
-    dp.include_router(evaluations.router)
     dp.include_router(admin_stats.router)
     dp.include_router(stats.router)
     dp.include_router(submissions.router)

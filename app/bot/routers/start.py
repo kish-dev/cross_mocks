@@ -11,7 +11,6 @@ from app.db.models import User, Session, SessionReview
 from app.db.session import SessionLocal
 from app.repositories.users import UsersRepo
 from app.bot.keyboards.common import (
-    interviews_entry_keyboard,
     main_menu_keyboard,
     track_keyboard,
 )
@@ -346,21 +345,3 @@ async def find_interviewer(callback: CallbackQuery):
     await callback.message.answer("Выбери тему собеса, который хочешь пройти:", reply_markup=track_keyboard("pass_track"))
     await callback.answer()
 
-
-@router.callback_query(F.data == "menu:interviews")
-async def interviews_entry(callback: CallbackQuery):
-    async with SessionLocal() as session:
-        pending = await get_pending_interviewer_reviews_for_tg_user(
-            session,
-            tg_user_id=callback.from_user.id,
-        )
-    if pending:
-        await callback.message.answer(build_pending_review_block_text(pending))
-        await callback.answer()
-        return
-
-    await callback.message.answer(
-        "Выбери сценарий:",
-        reply_markup=interviews_entry_keyboard(),
-    )
-    await callback.answer()

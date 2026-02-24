@@ -5,7 +5,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 def main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="📝 Отправить свой набор на проверку", callback_data="menu:submit_pack")
-    kb.button(text="🎯 Собесы с интервьюерами", callback_data="menu:interviews")
+    kb.button(text="🎯 Собесы с интервьюерами", callback_data="menu:find_interviewer")
     kb.button(text="📅 Предстоящие собесы", callback_data="menu:upcoming")
     kb.button(text="📊 Моя статистика", callback_data="menu:my_stats")
     if is_admin:
@@ -19,14 +19,6 @@ def admin_role_keyboard() -> InlineKeyboardMarkup:
     kb.button(text="Интервьюер", callback_data="admin_role:interviewer")
     kb.button(text="Кандидат", callback_data="admin_role:student")
     kb.adjust(2)
-    return kb.as_markup()
-
-
-def interviews_entry_keyboard() -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🎯 Хочу пройти собес", callback_data="menu:find_interviewer")
-    kb.button(text="🧑‍🏫 Хочу провести собес", callback_data="menu:find_student")
-    kb.adjust(1)
     return kb.as_markup()
 
 
