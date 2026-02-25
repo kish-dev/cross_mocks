@@ -160,6 +160,8 @@ async def test_collect_user_stats_recent_cards_and_peers():
         assert f"@peer_int_{suffix}" in rendered_candidate
         assert f"@peer_cand_{suffix}" in rendered_interviewer
         assert "completed" not in rendered_candidate
+        assert "|" not in rendered_candidate
+        assert "|" not in rendered_interviewer
     finally:
         if created_user_ids:
             await _cleanup_stats_rows(

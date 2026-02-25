@@ -64,28 +64,32 @@ class _FakeResult:
 
 
 class _FakeSession:
-    def __init__(self, proposal, student):
+    def __init__(self, proposal, student, interviewer):
         self._proposal = proposal
         self._student = student
+        self._interviewer = interviewer
         self._n = 0
 
     async def execute(self, _query):
         self._n += 1
         if self._n == 1:
             return _FakeResult(self._proposal)
-        return _FakeResult(self._student)
+        if self._n == 2:
+            return _FakeResult(self._student)
+        return _FakeResult(self._interviewer)
 
     async def commit(self):
         return None
 
 
 class _FakeSessionLocal:
-    def __init__(self, proposal, student):
+    def __init__(self, proposal, student, interviewer):
         self._proposal = proposal
         self._student = student
+        self._interviewer = interviewer
 
     async def __aenter__(self):
-        return _FakeSession(self._proposal, self._student)
+        return _FakeSession(self._proposal, self._student, self._interviewer)
 
     async def __aexit__(self, exc_type, exc, tb):
         return False
@@ -99,12 +103,13 @@ def test_feedback_text_detector():
 
 @pytest.mark.asyncio
 async def test_proposal_quick_time_clears_state_after_success(monkeypatch):
-    proposal = SimpleNamespace(id=1, options_json={}, student_id=11)
-    student = SimpleNamespace(tg_user_id=777)
+    proposal = SimpleNamespace(id=1, options_json={}, student_id=11, interviewer_id=12, track_code="final")
+    student = SimpleNamespace(tg_user_id=777, username="student_1")
+    interviewer = SimpleNamespace(tg_user_id=778, username="interviewer_1")
     monkeypatch.setattr("app.bot.routers.proposals.normalize_datetime_input", lambda _raw: "2026-12-31 19:00")
     monkeypatch.setattr("app.bot.routers.proposals.is_future_slot", lambda _raw: True)
     monkeypatch.setattr("app.bot.routers.proposals.safe_send", AsyncMock(return_value=(True, "")))
-    monkeypatch.setattr("app.bot.routers.proposals.SessionLocal", lambda: _FakeSessionLocal(proposal, student))
+    monkeypatch.setattr("app.bot.routers.proposals.SessionLocal", lambda: _FakeSessionLocal(proposal, student, interviewer))
 
     state = DummyState()
     callback = SimpleNamespace(

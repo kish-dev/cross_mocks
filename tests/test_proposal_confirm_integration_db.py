@@ -14,6 +14,8 @@ from app.bot.routers.proposals import proposal_confirm, proposal_pick_set
 from app.db.models import CandidateSet, InterviewProposal, PairStats, Session, SessionFeedback, SessionReview, User
 from app.db.session import SessionLocal
 
+pytestmark = pytest.mark.asyncio(loop_scope="session")
+
 
 async def _cleanup_created_rows(*, session_id: int | None, proposal_id: int, set_ids: list[int], student_id: int, interviewer_id: int):
     async with SessionLocal() as db:
@@ -30,7 +32,6 @@ async def _cleanup_created_rows(*, session_id: int | None, proposal_id: int, set
         await db.commit()
 
 
-@pytest.mark.asyncio
 async def test_proposal_confirm_creates_session_and_marks_accepted(monkeypatch):
     monkeypatch.setattr("app.bot.routers.proposals.sheets_sink.send", lambda *_args, **_kwargs: True)
     suffix = int(time.time() * 1000) % 1000000
@@ -118,7 +119,6 @@ async def test_proposal_confirm_creates_session_and_marks_accepted(monkeypatch):
     )
 
 
-@pytest.mark.asyncio
 async def test_proposal_confirm_waits_for_interviewer_set_pick_when_multiple_sets(monkeypatch):
     monkeypatch.setattr("app.bot.routers.proposals.sheets_sink.send", lambda *_args, **_kwargs: True)
     suffix = int(time.time() * 1000) % 1000000

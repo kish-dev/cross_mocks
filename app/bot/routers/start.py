@@ -18,9 +18,11 @@ from app.bot.routers.shared import (
     candidate_feedback_guide,
     continue_menu_for_user,
     continue_message_text,
+    format_tg_identity,
     interviewer_rubric_text,
     parse_feedback_score,
     safe_send,
+    track_purpose_label,
 )
 from app.services.review_guards import (
     build_pending_review_block_text,
@@ -60,11 +62,12 @@ def has_message_url(message: Message) -> bool:
     return bool(re.search(r"https?://\S+", message_context_text(message)))
 
 
-def candidate_feedback_guide_with_session(session_id: int) -> str:
+def candidate_feedback_guide_with_session(session_id: int, track_code: str | None = None) -> str:
+    purpose_line = f"\nНазначение: {track_purpose_label(track_code)}" if track_code else ""
     return (
         "Как оценить качество собеса и общение:\n"
         f"{candidate_feedback_guide()}\n"
-        f"session_id={session_id}"
+        f"session_id={session_id}{purpose_line}"
     )
 
 
@@ -72,7 +75,8 @@ def interviewer_rubric_with_session(track_code: str, session_id: int) -> str:
     return (
         "Гайд оценки для интервьюера:\n"
         f"{interviewer_rubric_text(track_code)}\n"
-        f"session_id={session_id}"
+        f"session_id={session_id}\n"
+        f"Назначение: {track_purpose_label(track_code)}"
     )
 
 
@@ -120,18 +124,24 @@ async def _handle_session_context_message(message: Message, session_id: int):
             s.meeting_url = meeting_url
             await session.commit()
 
-            await message.answer("Ссылку отправил кандидату ✅")
+            await message.answer(
+                "Ссылку отправил кандидату ✅\n"
+                f"Кандидат: {format_tg_identity(candidate.username if candidate else None, candidate.tg_user_id if candidate else None)}\n"
+                f"Назначение: {track_purpose_label(s.track_code)}"
+            )
             if candidate:
                 try:
                     await message.bot.send_message(
                         candidate.tg_user_id,
                         "Ссылка на созвон от интервьюера:\n"
                         f"{meeting_url}\n"
-                        f"session_id={session_id}",
+                        f"session_id={session_id}\n"
+                        f"Интервьюер: {format_tg_identity(me.username, me.tg_user_id)}\n"
+                        f"Назначение: {track_purpose_label(s.track_code)}",
                     )
                     await message.bot.send_message(
                         candidate.tg_user_id,
-                        candidate_feedback_guide_with_session(session_id)
+                        candidate_feedback_guide_with_session(session_id, s.track_code)
                     )
                 except Exception:
                     pass
@@ -280,7 +290,15 @@ async def feedback_without_reply(message: Message):
         )
         await session.commit()
 
-    await message.answer(f"Фидбек сохранен ✅ (session_id={target_session.id})")
+    peer = None
+    async with SessionLocal() as session:
+        peer = (await session.execute(select(User).where(User.id == target_id))).scalar_one_or_none()
+
+    await message.answer(
+        f"Фидбек сохранен ✅ (session_id={target_session.id})\n"
+        f"Участник: {format_tg_identity(peer.username if peer else None, peer.tg_user_id if peer else None)}\n"
+        f"Назначение: {track_purpose_label(target_session.track_code)}"
+    )
     await message.answer(
         continue_message_text(),
         reply_markup=continue_menu_for_user(message.from_user.id),
@@ -336,19 +354,27 @@ async def meeting_link_without_reply(message: Message, state: FSMContext):
         candidate.tg_user_id,
         "Ссылка на созвон от интервьюера:\n"
         f"{meeting_url}\n"
-        f"session_id={s.id}",
+        f"session_id={s.id}\n"
+        f"Интервьюер: {format_tg_identity(me.username, me.tg_user_id)}\n"
+        f"Назначение: {track_purpose_label(s.track_code)}",
     )
     ok2, err2 = await safe_send(
         message.bot,
         candidate.tg_user_id,
-        candidate_feedback_guide_with_session(s.id)
+        candidate_feedback_guide_with_session(s.id, s.track_code)
     )
 
     if ok1 and ok2:
-        await message.answer(f"Ссылку отправил кандидату для session_id={s.id} ✅")
+        await message.answer(
+            f"Ссылку отправил кандидату для session_id={s.id} ✅\n"
+            f"Кандидат: {format_tg_identity(candidate.username, candidate.tg_user_id)}\n"
+            f"Назначение: {track_purpose_label(s.track_code)}"
+        )
     else:
         await message.answer(
             f"Не удалось полностью доставить кандидату для session_id={s.id}.\n"
+            f"Кандидат: {format_tg_identity(candidate.username, candidate.tg_user_id)}\n"
+            f"Назначение: {track_purpose_label(s.track_code)}\n"
             f"link={ok1} ({err1})\nguide={ok2} ({err2})"
         )
 

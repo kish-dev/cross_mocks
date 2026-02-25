@@ -11,6 +11,26 @@ TRACK_LABELS = {
     "livecoding": "livecoding",
     "final": "final",
 }
+TRACK_PURPOSE_LABELS = {
+    "theory": "теория",
+    "sysdesign": "систем-дизайн",
+    "livecoding": "лайвкодинг",
+    "final": "финал",
+}
+
+
+def track_purpose_label(track_code: str | None) -> str:
+    return TRACK_PURPOSE_LABELS.get(track_code or "unknown", track_code or "unknown")
+
+
+def format_tg_identity(username: str | None, tg_user_id: int | None) -> str:
+    if username and tg_user_id is not None:
+        return f"@{username} (id:{tg_user_id})"
+    if username:
+        return f"@{username}"
+    if tg_user_id is not None:
+        return f"id:{tg_user_id}"
+    return "n/a"
 
 
 def to_gcal_link(title: str, details: str, start_dt: datetime, end_dt: datetime) -> str:

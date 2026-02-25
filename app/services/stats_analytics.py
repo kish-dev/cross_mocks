@@ -7,7 +7,7 @@ from statistics import mean
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.routers.shared import TRACK_LABELS
+from app.bot.routers.shared import TRACK_LABELS, format_tg_identity
 from app.db.models import Session, SessionReview, User
 from app.utils.time import utcnow
 
@@ -169,25 +169,26 @@ def track_slice_label(track_slice: str | None) -> str:
 
 
 def format_peer(peer_username: str | None, peer_tg_user_id: int | None) -> str:
-    if peer_username:
-        return f"@{peer_username}"
-    if peer_tg_user_id is not None:
-        return f"id:{peer_tg_user_id}"
-    return "n/a"
+    return format_tg_identity(peer_username, peer_tg_user_id)
 
 
 def format_recent_cards(cards: list[SessionCard], peer_role: str) -> str:
     if not cards:
         return "  • нет данных"
-    return "\n".join(
-        (
-            f"  • {c.starts_at.strftime('%Y-%m-%d %H:%M')} MSK"
-            f" | {format_track_code(c.track_code)}"
-            f" | {peer_role}: {format_peer(c.peer_username, c.peer_tg_user_id)}"
-            f" | статус: {format_session_status(c)} | session_id={c.session_id}"
+    blocks: list[str] = []
+    for c in cards:
+        blocks.append(
+            "\n".join(
+                [
+                    f"  • session_id={c.session_id}",
+                    f"    дата: {c.starts_at.strftime('%Y-%m-%d %H:%M')} MSK",
+                    f"    трек: {format_track_code(c.track_code)}",
+                    f"    {peer_role}: {format_peer(c.peer_username, c.peer_tg_user_id)}",
+                    f"    статус: {format_session_status(c)}",
+                ]
+            )
         )
-        for c in cards
-    )
+    return "\n\n".join(blocks)
 
 
 def format_trend_brief(label: str, trend: TrendMetrics) -> str:

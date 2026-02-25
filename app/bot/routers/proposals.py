@@ -9,7 +9,14 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy import func, select
 
 from app.bot.keyboards.common import start_only_keyboard
-from app.bot.routers.shared import TRACK_LABELS, continue_menu_for_user, safe_send, to_gcal_link
+from app.bot.routers.shared import (
+    TRACK_LABELS,
+    continue_menu_for_user,
+    format_tg_identity,
+    safe_send,
+    to_gcal_link,
+    track_purpose_label,
+)
 from app.config import settings
 from app.db.models import CandidateSet, InterviewProposal, PairStats, Session, User
 from app.db.session import SessionLocal
@@ -113,6 +120,10 @@ async def _notify_scheduled_session(
     ends_at: datetime,
     picked_str: str,
 ):
+    purpose = track_purpose_label(session_row.track_code)
+    candidate_ref = format_tg_identity(student.username, student.tg_user_id)
+    interviewer_ref = format_tg_identity(interviewer.username, interviewer.tg_user_id)
+
     sheets_sink.send(
         "session_scheduled",
         {
@@ -127,7 +138,7 @@ async def _notify_scheduled_session(
         },
     )
 
-    details = f"Собес по теме {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}. Telemost: {session_row.meeting_url}"
+    details = f"Собес по теме {purpose}. Telemost: {session_row.meeting_url}"
     gcal = to_gcal_link(
         title=f"Mock interview: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}",
         details=details,
@@ -139,7 +150,9 @@ async def _notify_scheduled_session(
         await callback.bot.send_message(
             student.tg_user_id,
             "Собес назначен ✅\n"
-            f"Тема: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}\n"
+            f"session_id={session_row.id}\n"
+            f"Назначение: {purpose}\n"
+            f"Интервьюер: {interviewer_ref}\n"
             f"Когда: {picked_str} MSK\n"
             f"Добавить в календарь: {gcal}\n"
             "Интервьюер пришлет ссылку на созвон отдельным сообщением.",
@@ -148,15 +161,14 @@ async def _notify_scheduled_session(
     except Exception:
         pass
 
-    candidate_nick = f"@{student.username}" if student.username else f"id:{student.tg_user_id}"
     try:
         await callback.bot.send_message(
             interviewer.tg_user_id,
             "Собес назначен ✅\n"
-            f"Тема: {TRACK_LABELS.get(session_row.track_code, session_row.track_code)}\n"
-            f"Когда: {picked_str} MSK\n"
-            f"Кандидат: {candidate_nick}\n"
             f"session_id={session_row.id}\n"
+            f"Назначение: {purpose}\n"
+            f"Когда: {picked_str} MSK\n"
+            f"Кандидат: {candidate_ref}\n"
             f"Добавить в календарь: {gcal}\n\n"
             "Создай встречу в Telemost и отправь ссылку reply-ответом или обычным сообщением — бот перешлёт её кандидату.\n\n"
             "Вопросы для собеса:\n"
@@ -265,13 +277,13 @@ async def pass_track(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardBuilder()
     if top_never:
         for u in top_never:
-            kb.button(text=f"🆕 @{u.username or u.id} (без собеса)", callback_data=f"pass_pick:{track}:{u.id}")
+            kb.button(text=f"🆕 {format_tg_identity(u.username, u.tg_user_id)} (без собеса)", callback_data=f"pass_pick:{track}:{u.id}")
     if top_other:
         for u in top_other:
-            kb.button(text=f"🔁 @{u.username or u.id} (другая тема)", callback_data=f"pass_pick:{track}:{u.id}")
+            kb.button(text=f"🔁 {format_tg_identity(u.username, u.tg_user_id)} (другая тема)", callback_data=f"pass_pick:{track}:{u.id}")
     if top_same:
         for u in top_same:
-            kb.button(text=f"⚠️ @{u.username or u.id} (уже был собес по этой теме)", callback_data=f"pass_pick:{track}:{u.id}")
+            kb.button(text=f"⚠️ {format_tg_identity(u.username, u.tg_user_id)} (уже был собес по этой теме)", callback_data=f"pass_pick:{track}:{u.id}")
 
     pool_ids = [u.id for u in top_never + top_other + top_same]
     await state.update_data(track=track, candidate_pool=pool_ids)
@@ -279,6 +291,7 @@ async def pass_track(callback: CallbackQuery, state: FSMContext):
     kb.adjust(1)
 
     await callback.message.answer(
+        f"Назначение: {track_purpose_label(track)}\n"
         "Выбери кандидата для собеса:\n"
         "— сначала топ-5, с кем ещё не было собеса\n"
         "— затем топ-5, с кем был собес на другой теме\n"
@@ -313,7 +326,8 @@ async def pass_pick_candidate(callback: CallbackQuery, state: FSMContext):
     await state.update_data(track=track, interviewer_id=int(interviewer_id))
 
     await callback.message.answer(
-        f"Выбран интервьюер: @{interviewer.username or 'no_username'} ✅\n"
+        f"Выбран интервьюер: {format_tg_identity(interviewer.username, interviewer.tg_user_id)} ✅\n"
+        f"Назначение: {track_purpose_label(track)}\n"
         "Пришли удобное время в формате YYYY-MM-DD HH:MM MSK, например: 2026-02-24 19:30"
     )
     await callback.answer()
@@ -352,7 +366,8 @@ async def pass_random_candidate(callback: CallbackQuery, state: FSMContext):
     await state.update_data(track=track, interviewer_id=int(interviewer_id))
 
     await callback.message.answer(
-        f"Случайный выбор: @{interviewer.username or 'no_username'} 🎲\n"
+        f"Случайный выбор: {format_tg_identity(interviewer.username, interviewer.tg_user_id)} 🎲\n"
+        f"Назначение: {track_purpose_label(track)}\n"
         "Пришли удобное время в формате YYYY-MM-DD HH:MM MSK, например: 2026-02-24 19:30"
     )
     await callback.answer()
@@ -421,8 +436,9 @@ async def schedule_after_match(message: Message, state: FSMContext):
         interviewer_tg_user_id=interviewer.tg_user_id,
         student_tg_user_id=message.from_user.id,
         request_text=request_text,
-        track_label=TRACK_LABELS.get(track, track),
-        candidate_username=(message.from_user.username or "no_username"),
+        purpose_label=track_purpose_label(track),
+        candidate_ref=format_tg_identity(student.username, student.tg_user_id),
+        interviewer_ref=format_tg_identity(interviewer.username, interviewer.tg_user_id),
     )
 
     await message.answer(payload.student_text)
@@ -475,10 +491,13 @@ async def proposal_offer_preparsed(callback: CallbackQuery):
     await callback.answer()
 
     try:
+        interviewer_ref = format_tg_identity(interviewer.username, interviewer.tg_user_id)
         await callback.bot.send_message(
             student.tg_user_id,
             "Интервьюер предложил итоговое время:\n"
             f"{picked} MSK\n"
+            f"Интервьюер: {interviewer_ref}\n"
+            f"Назначение: {track_purpose_label(proposal.track_code)}\n"
             "Подтверди слот:",
             reply_markup=kb.as_markup(),
         )
@@ -547,6 +566,7 @@ async def proposal_quick_time(callback: CallbackQuery, state: FSMContext):
             return
         proposal.options_json = {**(proposal.options_json or {}), "final_time": normalized}
         student = (await session.execute(select(User).where(User.id == proposal.student_id))).scalar_one_or_none()
+        interviewer = (await session.execute(select(User).where(User.id == proposal.interviewer_id))).scalar_one_or_none()
         await session.commit()
 
     from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -560,13 +580,19 @@ async def proposal_quick_time(callback: CallbackQuery, state: FSMContext):
         student.tg_user_id,
         "Интервьюер предложил итоговое время:\n"
         f"{normalized} MSK\n"
+        f"Интервьюер: {format_tg_identity(interviewer.username if interviewer else None, interviewer.tg_user_id if interviewer else None)}\n"
+        f"Назначение: {track_purpose_label(proposal.track_code)}\n"
         "Подтверди слот:",
         reply_markup=kb.as_markup(),
     )
     if not ok:
         await callback.message.answer(f"Не удалось отправить слот кандидату: {err}")
     else:
-        await callback.message.answer("Слот отправлен кандидату ✅")
+        await callback.message.answer(
+            "Слот отправлен кандидату ✅\n"
+            f"Кандидат: {format_tg_identity(student.username if student else None, student.tg_user_id if student else None)}\n"
+            f"Назначение: {track_purpose_label(proposal.track_code)}"
+        )
 
     await state.clear()
     await callback.answer()
@@ -642,13 +668,19 @@ async def proposal_receive_final_time(message: Message, state: FSMContext):
     kb.adjust(1)
 
     await state.clear()
-    await message.answer("Отправил слот кандидату на подтверждение ✅")
+    await message.answer(
+        "Отправил слот кандидату на подтверждение ✅\n"
+        f"Кандидат: {format_tg_identity(student.username, student.tg_user_id)}\n"
+        f"Назначение: {track_purpose_label(proposal.track_code)}"
+    )
 
     ok, err = await safe_send(
         message.bot,
         student.tg_user_id,
         "Интервьюер предложил итоговое время:\n"
         f"{normalized} MSK\n"
+        f"Интервьюер: {format_tg_identity(interviewer.username, interviewer.tg_user_id)}\n"
+        f"Назначение: {track_purpose_label(proposal.track_code)}\n"
         "Подтверди слот:",
         reply_markup=kb.as_markup(),
     )
@@ -675,7 +707,11 @@ async def proposal_reject(callback: CallbackQuery):
         return
 
     await callback.answer("Отклонено")
-    await callback.message.answer("Ок, слот отклонён. Интервьюер предложит другой.")
+    await callback.message.answer(
+        "Ок, слот отклонён. Интервьюер предложит другой.\n"
+        f"Интервьюер: {format_tg_identity(interviewer.username, interviewer.tg_user_id)}\n"
+        f"Назначение: {track_purpose_label(proposal.track_code)}"
+    )
 
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     kb = InlineKeyboardBuilder()
@@ -685,7 +721,9 @@ async def proposal_reject(callback: CallbackQuery):
     try:
         await callback.bot.send_message(
             interviewer.tg_user_id,
-            "Кандидат отклонил слот. Предложи другое время:",
+            "Кандидат отклонил слот. Предложи другое время:\n"
+            f"Кандидат: {format_tg_identity(student.username, student.tg_user_id)}\n"
+            f"Назначение: {track_purpose_label(proposal.track_code)}",
             reply_markup=kb.as_markup(),
         )
     except Exception:
@@ -748,10 +786,16 @@ async def proposal_confirm(callback: CallbackQuery):
             interviewer.tg_user_id,
             "Кандидат подтвердил слот.\n"
             f"Когда: {picked_str} MSK\n\n"
+            f"Кандидат: {format_tg_identity(student.username, student.tg_user_id)}\n"
+            f"Назначение: {track_purpose_label(proposal.track_code)}\n\n"
             "Выбери набор вопросов для этого собеса:",
             reply_markup=kb.as_markup(),
         )
-        await callback.message.answer("Слот подтвержден ✅ Ожидаем, пока интервьюер выберет набор для собеса.")
+        await callback.message.answer(
+            "Слот подтвержден ✅ Ожидаем, пока интервьюер выберет набор для собеса.\n"
+            f"Интервьюер: {format_tg_identity(interviewer.username, interviewer.tg_user_id)}\n"
+            f"Назначение: {track_purpose_label(proposal.track_code)}"
+        )
         await callback.answer()
         if not ok:
             await callback.message.answer(
@@ -769,7 +813,10 @@ async def proposal_confirm(callback: CallbackQuery):
         await callback.answer(err or "Не удалось назначить собес", show_alert=True)
         return
 
-    await callback.message.answer(f"Слот подтвержден: {picked_str} ✅")
+    await callback.message.answer(
+        f"Слот подтвержден: {picked_str} ✅\n"
+        f"Назначение: {track_purpose_label(session_row.track_code)}"
+    )
     await callback.answer()
     await _notify_scheduled_session(
         callback=callback,
@@ -807,7 +854,11 @@ async def proposal_pick_set(callback: CallbackQuery):
         await callback.answer(err or "Не удалось назначить собес", show_alert=True)
         return
 
-    await callback.message.answer("Набор выбран. Собес назначен ✅")
+    await callback.message.answer(
+        "Набор выбран. Собес назначен ✅\n"
+        f"Назначение: {track_purpose_label(session_row.track_code)}\n"
+        f"Кандидат: {format_tg_identity(student.username, student.tg_user_id)}"
+    )
     await callback.answer()
     await _notify_scheduled_session(
         callback=callback,

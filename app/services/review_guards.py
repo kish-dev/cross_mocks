@@ -7,7 +7,7 @@ from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.bot.routers.shared import TRACK_LABELS
+from app.bot.routers.shared import format_tg_identity, track_purpose_label
 from app.db.models import Session, SessionReview, User
 from app.utils.time import utcnow
 
@@ -25,7 +25,7 @@ class PendingInterviewerReview:
 
 
 def _track_label(track_code: str) -> str:
-    return TRACK_LABELS.get(track_code, track_code)
+    return track_purpose_label(track_code)
 
 
 def _pending_interviewer_review_stmt(now: datetime):
@@ -164,11 +164,18 @@ def build_pending_review_block_text(items: list[PendingInterviewerReview], *, li
         "Нужно закрыть:",
     ]
     for item in items[:limit]:
-        candidate = f"@{item.candidate_username}" if item.candidate_username else f"id:{item.candidate_tg_user_id}"
-        lines.append(
-            f"• session_id={item.session_id} | {_track_label(item.track_code)} | "
-            f"{item.starts_at.strftime('%Y-%m-%d %H:%M')} MSK | кандидат: {candidate}"
+        candidate = format_tg_identity(item.candidate_username, item.candidate_tg_user_id)
+        lines.extend(
+            [
+                f"• session_id={item.session_id}",
+                f"  Трек: {_track_label(item.track_code)}",
+                f"  Когда: {item.starts_at.strftime('%Y-%m-%d %H:%M')} MSK",
+                f"  Кандидат: {candidate}",
+                "",
+            ]
         )
+    if lines and lines[-1] == "":
+        lines.pop()
     lines.extend(
         [
             "",
@@ -180,7 +187,7 @@ def build_pending_review_block_text(items: list[PendingInterviewerReview], *, li
 
 
 def build_pending_review_reminder_text(item: PendingInterviewerReview) -> str:
-    candidate = f"@{item.candidate_username}" if item.candidate_username else f"id:{item.candidate_tg_user_id}"
+    candidate = format_tg_identity(item.candidate_username, item.candidate_tg_user_id)
     return (
         "📝 Напоминание: нужно оставить отзыв на кандидата.\n"
         f"session_id={item.session_id}\n"

@@ -3,7 +3,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 
-from app.bot.routers.shared import TRACK_LABELS, to_gcal_link
+from app.bot.routers.shared import TRACK_LABELS, format_tg_identity, to_gcal_link, track_purpose_label
 from app.db.models import CandidateSet, Session, User
 from app.db.session import SessionLocal
 from app.services.stats_analytics import (
@@ -116,22 +116,34 @@ async def _render_upcoming_page(target_message, tg_user_id: int, page: int = 0):
 
         kb = InlineKeyboardBuilder()
 
-        lines = [f"Предстоящие собесы (страница {page + 1}) — время в MSK:"]
+        lines = [f"Предстоящие собесы (страница {page + 1}) — время в MSK:", ""]
         for idx, (s, set_title, student_username, student_tg_id) in enumerate(chunk, start=start + 1):
             is_interviewer = s.interviewer_id == me.id
             role = "интервьюер" if is_interviewer else "кандидат"
 
             if is_interviewer:
-                peer_name = f"@{student_username}" if student_username else f"id:{student_tg_id}"
+                peer_name = format_tg_identity(student_username, student_tg_id)
             else:
                 interviewer = (await session.execute(select(User).where(User.id == s.interviewer_id))).scalar_one_or_none()
-                peer_name = f"@{interviewer.username}" if interviewer and interviewer.username else f"id:{interviewer.tg_user_id if interviewer else 'n/a'}"
+                peer_name = format_tg_identity(
+                    interviewer.username if interviewer else None,
+                    interviewer.tg_user_id if interviewer else None,
+                )
 
-            title_part = f" | набор: {set_title or 'n/a'}" if is_interviewer else ""
-            lines.append(
-                f"• {idx}. {s.starts_at.strftime('%Y-%m-%d %H:%M')} MSK | {TRACK_LABELS.get(s.track_code, s.track_code)} | {role} | второй: {peer_name}{title_part} (id:{s.id})"
+            lines.extend(
+                [
+                    f"• {idx}. session_id={s.id}",
+                    f"  Когда: {s.starts_at.strftime('%Y-%m-%d %H:%M')} MSK",
+                    f"  Назначение: {track_purpose_label(s.track_code)}",
+                    f"  Роль: {role}",
+                    f"  Второй участник: {peer_name}",
+                ]
             )
+            if is_interviewer:
+                lines.append(f"  Набор: {set_title or 'n/a'}")
+            lines.append("")
 
+            kb.button(text=f"▶️ Начать собес {idx}", callback_data=f"session:start:{s.id}")
             kb.button(text=f"📅 Календарь {idx}", callback_data=f"upg:cal:{s.id}")
             kb.button(text=f"🗑 Удалить {idx}", callback_data=f"upg:del:{s.id}")
 
@@ -141,6 +153,8 @@ async def _render_upcoming_page(target_message, tg_user_id: int, page: int = 0):
             kb.button(text="Вперёд ➡️", callback_data=f"upg:page:{page+1}")
         kb.adjust(1)
 
+    if lines and lines[-1] == "":
+        lines.pop()
     await target_message.answer("\n".join(lines), reply_markup=kb.as_markup())
 
 
@@ -169,10 +183,14 @@ async def upcoming_delete(callback: CallbackQuery):
         if s.status != "scheduled":
             await callback.answer("Можно удалить только запланированный собес", show_alert=True)
             return
+        purpose = track_purpose_label(s.track_code)
         s.status = "cancelled"
         await session.commit()
 
-    await callback.message.answer(f"Собес #{session_id} удален из расписания ✅")
+    await callback.message.answer(
+        f"Собес #{session_id} удален из расписания ✅\n"
+        f"Назначение: {purpose}"
+    )
     await callback.answer()
 
 
@@ -185,6 +203,8 @@ async def upcoming_calendar(callback: CallbackQuery):
         if not me or not s or me.id not in {s.student_id, s.interviewer_id}:
             await callback.answer("Нет доступа", show_alert=True)
             return
+        student = (await session.execute(select(User).where(User.id == s.student_id))).scalar_one_or_none()
+        interviewer = (await session.execute(select(User).where(User.id == s.interviewer_id))).scalar_one_or_none()
 
     gcal = to_gcal_link(
         title=f"Mock interview: {TRACK_LABELS.get(s.track_code, s.track_code)}",
@@ -193,7 +213,14 @@ async def upcoming_calendar(callback: CallbackQuery):
         end_dt=s.ends_at,
     )
     ics_stub = f"https://calendar.google.com/calendar/ical/{s.id}.ics"
-    await callback.message.answer(f"Для собеса #{s.id}:\nGoogle Calendar: {gcal}\niCal: {ics_stub}")
+    await callback.message.answer(
+        f"Для собеса #{s.id}:\n"
+        f"Назначение: {track_purpose_label(s.track_code)}\n"
+        f"Кандидат: {format_tg_identity(student.username if student else None, student.tg_user_id if student else None)}\n"
+        f"Интервьюер: {format_tg_identity(interviewer.username if interviewer else None, interviewer.tg_user_id if interviewer else None)}\n"
+        f"Google Calendar: {gcal}\n"
+        f"iCal: {ics_stub}"
+    )
     await callback.answer()
 
 

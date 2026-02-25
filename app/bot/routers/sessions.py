@@ -8,13 +8,14 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 
 from app.bot.routers.shared import (
-    TRACK_LABELS,
     candidate_feedback_guide,
     continue_menu_for_user,
     continue_message_text,
+    format_tg_identity,
     interviewer_rubric_text,
     parse_feedback_score,
     safe_send,
+    track_purpose_label,
 )
 from app.config import settings
 from app.db.models import Session, SessionReview, User
@@ -67,23 +68,32 @@ async def _try_forward_meeting_link(message: Message) -> bool:
         candidate.tg_user_id,
         "Ссылка на созвон от интервьюера:\n"
         f"{meeting_url}\n"
-        f"session_id={s.id}",
+        f"session_id={s.id}\n"
+        f"Интервьюер: {format_tg_identity(me.username, me.tg_user_id)}\n"
+        f"Назначение: {track_purpose_label(s.track_code)}",
     )
     await safe_send(
         message.bot,
         candidate.tg_user_id,
         "Как оценить качество собеса и общение:\n"
         f"{candidate_feedback_guide()}\n"
-        f"session_id={s.id}",
+        f"session_id={s.id}\n"
+        f"Назначение: {track_purpose_label(s.track_code)}",
     )
     await safe_send(
         message.bot,
         me.tg_user_id,
         "Гайд оценки для интервьюера:\n"
         f"{interviewer_rubric_text(s.track_code)}\n"
-        f"session_id={s.id}",
+        f"session_id={s.id}\n"
+        f"Кандидат: {format_tg_identity(candidate.username, candidate.tg_user_id)}\n"
+        f"Назначение: {track_purpose_label(s.track_code)}",
     )
-    await message.answer(f"Ссылку отправил кандидату для session_id={s.id} ✅")
+    await message.answer(
+        f"Ссылку отправил кандидату для session_id={s.id} ✅\n"
+        f"Кандидат: {format_tg_identity(candidate.username, candidate.tg_user_id)}\n"
+        f"Назначение: {track_purpose_label(s.track_code)}"
+    )
     return True
 
 
@@ -117,6 +127,10 @@ async def session_start_now(callback: CallbackQuery):
             await callback.bot.send_message(
                 u.tg_user_id,
                 "⚡ Собес начинается сейчас!\n"
+                f"session_id={s.id}\n"
+                f"Назначение: {track_purpose_label(s.track_code)}\n"
+                f"Кандидат: {format_tg_identity(student.username if student else None, student.tg_user_id if student else None)}\n"
+                f"Интервьюер: {format_tg_identity(interviewer.username if interviewer else None, interviewer.tg_user_id if interviewer else None)}\n"
                 f"Базовая ссылка Telemost: {settings.TELEMOST_URL}\n"
                 "Если нужна приватная встреча — интервьюер создает её и отправляет ссылку кандидату reply-сообщением или обычным сообщением в чат.",
             )
@@ -155,22 +169,32 @@ async def session_start(callback: CallbackQuery, state: FSMContext):
 
     if first_start and student and interviewer:
         second_tg_id = interviewer.tg_user_id if me.id == student.id else student.tg_user_id
-        ok1, err1 = await safe_send(callback.bot, second_tg_id, "Партнер нажал «Пройти собес». Собес ожидает начала.")
+        ok1, err1 = await safe_send(
+            callback.bot,
+            second_tg_id,
+            "Партнер нажал «Пройти собес». Собес ожидает начала.\n"
+            f"session_id={session_id}\n"
+            f"Назначение: {track_purpose_label(s.track_code)}",
+        )
 
         ok2, err2 = await safe_send(
             callback.bot,
             interviewer.tg_user_id,
             "Создай ссылку на созвон в Telemost:\n"
             f"{settings.TELEMOST_URL}\n\n"
-            f"Кандидат: @{student.username if student.username else student.tg_user_id}\n"
+            f"Кандидат: {format_tg_identity(student.username, student.tg_user_id)}\n"
             f"session_id={session_id}\n"
+            f"Назначение: {track_purpose_label(s.track_code)}\n"
             "Отправь ссылку reply-ответом или обычным сообщением — она будет направлена кандидату.",
         )
 
         ok3, err3 = await safe_send(
             callback.bot,
             student.tg_user_id,
-            "Ссылка на созвон появится, когда интервьюер создаст её. Отправлю новым сообщением.",
+            "Ссылка на созвон появится, когда интервьюер создаст её. Отправлю новым сообщением.\n"
+            f"session_id={session_id}\n"
+            f"Интервьюер: {format_tg_identity(interviewer.username, interviewer.tg_user_id)}\n"
+            f"Назначение: {track_purpose_label(s.track_code)}",
         )
 
         if not (ok1 and ok2 and ok3):
@@ -288,7 +312,9 @@ async def session_review_comment(message: Message, state: FSMContext):
                         admin_id,
                         "Собес закрыт ✅\n"
                         f"session_id={session_id}\n"
-                        f"Тема: {TRACK_LABELS.get(s.track_code, s.track_code)}\n"
+                        f"Назначение: {track_purpose_label(s.track_code)}\n"
+                        f"Кандидат: {format_tg_identity(users[s.student_id].username if users.get(s.student_id) else None, users[s.student_id].tg_user_id if users.get(s.student_id) else None)}\n"
+                        f"Интервьюер: {format_tg_identity(users[s.interviewer_id].username if users.get(s.interviewer_id) else None, users[s.interviewer_id].tg_user_id if users.get(s.interviewer_id) else None)}\n"
                         f"Кандидат фидбек: {cand_review.score if cand_review else 'n/a'} / {cand_review.comment if cand_review else 'n/a'}\n"
                         f"Интервьюер фидбек: {int_review.score if int_review else 'n/a'} / {int_review.comment if int_review else 'n/a'}",
                     )

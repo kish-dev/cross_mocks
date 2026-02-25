@@ -77,6 +77,7 @@ def test_user_stats_text_contains_required_sections():
     assert "Последние 5 как интервьюер" in full
     assert "session_id=202" in full
     assert "@candidate_1" in full
+    assert "|" not in full
 
 
 def test_admin_stats_text_contains_required_sections():
@@ -90,3 +91,4 @@ def test_admin_stats_text_contains_required_sections():
     assert "как интервьюер, полная" in full_interviewer
     assert "Разбивка по трекам как интервьюер" in full_interviewer
     assert "session_id=202" in full_interviewer
+    assert "|" not in full_interviewer

@@ -91,6 +91,7 @@ async def test_pending_interviewer_review_detected_and_text_is_actionable():
         assert "session_id=" in text
         assert "новые собесы недоступны" in text
         assert "Итог: 2.5" in text
+        assert "|" not in text
     finally:
         if created_user_ids:
             await _cleanup(

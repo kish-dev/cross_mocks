@@ -11,15 +11,17 @@ def test_time_proposal_payload_contains_required_routing_text():
         interviewer_tg_user_id=100,
         student_tg_user_id=200,
         request_text="завтра после 18",
-        track_label="livecoding",
-        candidate_username="candidate_one",
+        purpose_label="лайвкодинг",
+        candidate_ref="@candidate_one (id:200)",
+        interviewer_ref="@interviewer_one (id:100)",
     )
 
     assert payload.interviewer_tg_user_id == 100
     assert payload.student_tg_user_id == 200
     assert "Новый запрос на собес" in payload.interviewer_text
-    assert "@candidate_one" in payload.interviewer_text
-    assert "livecoding" in payload.interviewer_text
+    assert "@candidate_one (id:200)" in payload.interviewer_text
+    assert "лайвкодинг" in payload.interviewer_text
     assert "завтра после 18" in payload.interviewer_text
     assert "MSK" in payload.interviewer_text
-    assert payload.student_text == "Запрос отправлен интервьюеру ✅"
+    assert "@interviewer_one (id:100)" in payload.student_text
+    assert "Назначение: лайвкодинг" in payload.student_text
