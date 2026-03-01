@@ -35,6 +35,11 @@ def test_analyze_trend_handles_insufficient_data():
     assert summary.confidence_label == "низкая"
 
 
+def test_analyze_trend_confidence_thresholds():
+    assert analyze_trend([1.0, 1.2, 1.4]).confidence_label == "хорошая"
+    assert analyze_trend([1.0, 1.1, 1.2, 1.3, 1.4, 1.5]).confidence_label == "высокая"
+
+
 def test_analyze_trend_has_delta_for_enough_points():
     summary = analyze_trend([1.0, 1.1, 1.2, 1.3, 1.4, 1.6, 1.7, 1.8, 1.9, 2.0])
     assert summary.delta_recent_vs_prev is not None

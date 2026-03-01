@@ -10,7 +10,9 @@ from app.services.stats_analytics import (
     DEFAULT_TRACK_SLICE,
     TRACK_SLICE_LABELS,
     UserStatsSnapshot,
+    collect_user_session_details,
     collect_user_stats,
+    format_detailed_session_card,
     format_recent_cards,
     format_track_code,
     format_trend_brief,
@@ -36,6 +38,38 @@ def _stats_actions_keyboard(track_slice: str) -> InlineKeyboardBuilder:
     kb.button(text="📈 График (20)", callback_data=f"stats:user:graph:{normalized}")
     kb.adjust(3, 2, 1, 1)
     return kb
+
+
+def _stats_full_keyboard(track_slice: str) -> InlineKeyboardBuilder:
+    normalized = normalize_track_slice(track_slice)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🧾 Полные данные по всем сессиям", callback_data=f"stats:user:sessions_open:{normalized}")
+    kb.button(text="↩️ Вернуться к краткой", callback_data=f"stats:user:slice:{normalized}")
+    kb.adjust(1)
+    return kb
+
+
+def _stats_sessions_keyboard(page: int, total: int, track_slice: str) -> InlineKeyboardBuilder:
+    normalized = normalize_track_slice(track_slice)
+    kb = InlineKeyboardBuilder()
+    if page > 0:
+        kb.button(text="⬅️ Предыдущий собес", callback_data=f"stats:user:sessions_page:{page - 1}:{normalized}")
+    if page + 1 < total:
+        kb.button(text="Следующий собес ➡️", callback_data=f"stats:user:sessions_page:{page + 1}:{normalized}")
+    kb.button(text="↩️ К полной статистике", callback_data=f"stats:user:full:{normalized}")
+    kb.adjust(2, 1)
+    return kb
+
+
+def _render_user_session_details_page(cards, page: int, track_slice: str) -> str:
+    total = len(cards)
+    card = cards[page]
+    return (
+        "Полные данные по собесу:\n"
+        f"— Срез: {TRACK_SLICE_LABELS[normalize_track_slice(track_slice)]}\n"
+        f"— Карточка: {page + 1} из {total}\n\n"
+        f"{format_detailed_session_card(card)}"
+    )
 
 
 def _render_user_summary(snapshot: UserStatsSnapshot) -> str:
@@ -269,7 +303,67 @@ async def my_stats_full(callback: CallbackQuery):
             return
         snapshot = await collect_user_stats(session, db_user, track_slice=track_slice)
 
-    await callback.message.answer(_render_user_full(snapshot))
+    await callback.message.answer(
+        _render_user_full(snapshot),
+        reply_markup=_stats_full_keyboard(snapshot.track_slice).as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("stats:user:sessions_open:"))
+async def my_stats_sessions_open(callback: CallbackQuery):
+    track_slice = normalize_track_slice(callback.data.split(":")[-1])
+    async with SessionLocal() as session:
+        db_user = (await session.execute(select(User).where(User.tg_user_id == callback.from_user.id))).scalar_one_or_none()
+        if not db_user:
+            await callback.answer("Пользователь не найден", show_alert=True)
+            return
+        cards = await collect_user_session_details(session, db_user, track_slice=track_slice)
+
+    if not cards:
+        await callback.message.answer("По выбранному срезу нет сессий для детального просмотра.")
+        await callback.answer()
+        return
+
+    await callback.message.answer(
+        _render_user_session_details_page(cards, page=0, track_slice=track_slice),
+        reply_markup=_stats_sessions_keyboard(0, len(cards), track_slice).as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("stats:user:sessions_page:"))
+async def my_stats_sessions_page(callback: CallbackQuery):
+    payload = callback.data.split(":")
+    if len(payload) < 6:
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+
+    try:
+        requested_page = int(payload[4])
+    except ValueError:
+        await callback.answer("Некорректная страница", show_alert=True)
+        return
+
+    track_slice = normalize_track_slice(payload[5])
+    async with SessionLocal() as session:
+        db_user = (await session.execute(select(User).where(User.tg_user_id == callback.from_user.id))).scalar_one_or_none()
+        if not db_user:
+            await callback.answer("Пользователь не найден", show_alert=True)
+            return
+        cards = await collect_user_session_details(session, db_user, track_slice=track_slice)
+
+    if not cards:
+        await callback.answer("Сессии не найдены", show_alert=True)
+        return
+
+    page = max(0, min(requested_page, len(cards) - 1))
+    text = _render_user_session_details_page(cards, page=page, track_slice=track_slice)
+    markup = _stats_sessions_keyboard(page, len(cards), track_slice).as_markup()
+    try:
+        await callback.message.edit_text(text, reply_markup=markup)
+    except Exception:
+        await callback.message.answer(text, reply_markup=markup)
     await callback.answer()
 
 

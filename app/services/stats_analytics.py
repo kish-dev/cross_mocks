@@ -6,10 +6,28 @@ from statistics import mean
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
-from app.bot.routers.shared import TRACK_LABELS, format_tg_identity
-from app.db.models import Session, SessionReview, User
+from app.db.models import CandidateSet, Session, SessionReview, User
 from app.utils.time import utcnow
+
+TRACK_LABELS = {
+    "theory": "theory",
+    "sysdesign": "system-design",
+    "livecoding": "livecoding",
+    "final": "final",
+}
+
+
+def format_tg_identity(username: str | None, tg_user_id: int | None) -> str:
+    if username and tg_user_id is not None:
+        return f"@{username} (id:{tg_user_id})"
+    if username:
+        return f"@{username}"
+    if tg_user_id is not None:
+        return f"id:{tg_user_id}"
+    return "n/a"
+
 
 DEFAULT_TRACK_SLICE = "all"
 TRACK_SLICE_TO_CODE: dict[str, str | None] = {
@@ -38,6 +56,26 @@ class SessionCard:
     candidate_review_submitted: bool
     peer_username: str | None
     peer_tg_user_id: int | None
+
+
+@dataclass
+class SessionDetailedCard:
+    session_id: int
+    starts_at: datetime
+    ends_at: datetime
+    track_code: str
+    status: str
+    meeting_url: str | None
+    set_title: str | None
+    candidate_username: str | None
+    candidate_tg_user_id: int | None
+    interviewer_username: str | None
+    interviewer_tg_user_id: int | None
+    candidate_score: int | None
+    candidate_comment: str | None
+    interviewer_score: int | None
+    interviewer_comment: str | None
+    viewer_role: str | None
 
 
 @dataclass
@@ -103,10 +141,10 @@ def linear_regression_slope(values: list[float]) -> float:
 
 
 def _confidence_label(points_count: int) -> str:
-    if points_count >= 15:
+    if points_count >= 6:
         return "высокая"
-    if points_count >= 8:
-        return "средняя"
+    if points_count >= 3:
+        return "хорошая"
     return "низкая"
 
 
@@ -191,6 +229,69 @@ def format_recent_cards(cards: list[SessionCard], peer_role: str) -> str:
     return "\n\n".join(blocks)
 
 
+def _format_long_text(value: str | None) -> str:
+    if not value:
+        return '"нет комментария"'
+    normalized = value.strip().replace('"', '\\"')
+    return f'"{normalized}"'.replace("\n", "\n      ")
+
+
+def _format_score(value: int | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{float(value):.1f}"
+
+
+def format_detailed_session_card(card: SessionDetailedCard) -> str:
+    starts_at = card.starts_at.strftime("%Y-%m-%d %H:%M")
+    ends_at = card.ends_at.strftime("%Y-%m-%d %H:%M")
+    meeting = card.meeting_url or "не указана"
+    set_title = card.set_title or "n/a"
+    candidate_done = card.candidate_score is not None
+    interviewer_done = card.interviewer_score is not None
+
+    role_line = ""
+    if card.viewer_role == "candidate":
+        role_line = "\n  твоя роль: кандидат"
+    elif card.viewer_role == "interviewer":
+        role_line = "\n  твоя роль: интервьюер"
+
+    status_text = format_session_status(
+        SessionCard(
+            session_id=card.session_id,
+            starts_at=card.starts_at,
+            track_code=card.track_code,
+            status=card.status,
+            interviewer_review_submitted=interviewer_done,
+            candidate_review_submitted=candidate_done,
+            peer_username=None,
+            peer_tg_user_id=None,
+        )
+    )
+
+    candidate_score = _format_score(card.candidate_score)
+    interviewer_score = _format_score(card.interviewer_score)
+    candidate_comment = _format_long_text(card.candidate_comment)
+    interviewer_comment = _format_long_text(card.interviewer_comment)
+
+    return "\n".join(
+        [
+            f"• session_id={card.session_id}",
+            f"  когда: {starts_at} — {ends_at} MSK",
+            f"  назначение: {format_track_code(card.track_code)}",
+            f"  статус: {status_text}{role_line}",
+            f"  кандидат: {format_peer(card.candidate_username, card.candidate_tg_user_id)}",
+            f"  интервьюер: {format_peer(card.interviewer_username, card.interviewer_tg_user_id)}",
+            f"  набор: {set_title}",
+            f"  встреча: {meeting}",
+            f"  фидбек кандидата: {candidate_score}",
+            f"      {candidate_comment}",
+            f"  фидбек интервьюера: {interviewer_score}",
+            f"      {interviewer_comment}",
+        ]
+    )
+
+
 def format_trend_brief(label: str, trend: TrendMetrics) -> str:
     if trend.points_count == 0:
         return f"{label}: пока нет данных."
@@ -223,6 +324,98 @@ def format_session_status(card: SessionCard) -> str:
     if card.status == "completed":
         return "завершен"
     return card.status
+
+
+async def collect_user_session_details(
+    session: AsyncSession,
+    db_user: User,
+    *,
+    track_slice: str = DEFAULT_TRACK_SLICE,
+) -> list[SessionDetailedCard]:
+    normalized_slice = normalize_track_slice(track_slice)
+    track_code_filter = track_code_for_slice(normalized_slice)
+    candidate_user = aliased(User)
+    interviewer_user = aliased(User)
+
+    filters = [
+        Session.status != "cancelled",
+        ((Session.student_id == db_user.id) | (Session.interviewer_id == db_user.id)),
+    ]
+    if track_code_filter is not None:
+        filters.append(Session.track_code == track_code_filter)
+
+    rows = (
+        await session.execute(
+            select(
+                Session,
+                CandidateSet.title,
+                candidate_user.username,
+                candidate_user.tg_user_id,
+                interviewer_user.username,
+                interviewer_user.tg_user_id,
+            )
+            .join(CandidateSet, CandidateSet.id == Session.pack_id, isouter=True)
+            .join(candidate_user, candidate_user.id == Session.student_id, isouter=True)
+            .join(interviewer_user, interviewer_user.id == Session.interviewer_id, isouter=True)
+            .where(*filters)
+            .order_by(Session.starts_at.desc(), Session.id.desc())
+        )
+    ).all()
+
+    session_ids = [s.id for s, *_ in rows]
+    review_rows = (
+        (
+            await session.execute(
+                select(
+                    SessionReview.session_id,
+                    SessionReview.author_role,
+                    SessionReview.score,
+                    SessionReview.comment,
+                ).where(SessionReview.session_id.in_(session_ids))
+            )
+        ).all()
+        if session_ids
+        else []
+    )
+
+    reviews_map: dict[int, dict[str, tuple[int, str]]] = {}
+    for session_id, author_role, score, comment in review_rows:
+        reviews_map.setdefault(session_id, {})[author_role] = (int(score), comment)
+
+    cards: list[SessionDetailedCard] = []
+    for s, set_title, candidate_username, candidate_tg_user_id, interviewer_username, interviewer_tg_user_id in rows:
+        by_role = reviews_map.get(s.id, {})
+        candidate_score, candidate_comment = by_role.get("candidate", (None, None))
+        interviewer_score, interviewer_comment = by_role.get("interviewer", (None, None))
+
+        viewer_role = None
+        if s.student_id == db_user.id:
+            viewer_role = "candidate"
+        elif s.interviewer_id == db_user.id:
+            viewer_role = "interviewer"
+
+        cards.append(
+            SessionDetailedCard(
+                session_id=s.id,
+                starts_at=s.starts_at,
+                ends_at=s.ends_at,
+                track_code=s.track_code,
+                status=s.status,
+                meeting_url=s.meeting_url,
+                set_title=set_title,
+                candidate_username=candidate_username,
+                candidate_tg_user_id=candidate_tg_user_id,
+                interviewer_username=interviewer_username,
+                interviewer_tg_user_id=interviewer_tg_user_id,
+                candidate_score=candidate_score,
+                candidate_comment=candidate_comment,
+                interviewer_score=interviewer_score,
+                interviewer_comment=interviewer_comment,
+                viewer_role=viewer_role,
+            )
+        )
+
+    return cards
 
 
 async def collect_user_stats(

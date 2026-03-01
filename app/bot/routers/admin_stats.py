@@ -13,7 +13,9 @@ from app.services.stats_analytics import (
     DEFAULT_TRACK_SLICE,
     TRACK_SLICE_LABELS,
     UserStatsSnapshot,
+    collect_user_session_details,
     collect_user_stats,
+    format_detailed_session_card,
     format_recent_cards,
     format_track_code,
     format_trend_brief,
@@ -42,6 +44,47 @@ def _admin_stats_actions_keyboard(user_id: int, mode: str, track_slice: str) -> 
     return kb
 
 
+def _admin_stats_full_keyboard(user_id: int, mode: str, track_slice: str) -> InlineKeyboardBuilder:
+    normalized = normalize_track_slice(track_slice)
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="🧾 Полные данные по всем сессиям",
+        callback_data=f"admin_stats:sessions_open:{user_id}:{mode}:{normalized}",
+    )
+    kb.button(text="↩️ Вернуться к краткой", callback_data=f"admin_stats:slice:{user_id}:{mode}:{normalized}")
+    kb.adjust(1)
+    return kb
+
+
+def _admin_sessions_keyboard(user_id: int, mode: str, page: int, total: int, track_slice: str) -> InlineKeyboardBuilder:
+    normalized = normalize_track_slice(track_slice)
+    kb = InlineKeyboardBuilder()
+    if page > 0:
+        kb.button(
+            text="⬅️ Предыдущий собес",
+            callback_data=f"admin_stats:sessions_page:{user_id}:{mode}:{page - 1}:{normalized}",
+        )
+    if page + 1 < total:
+        kb.button(
+            text="Следующий собес ➡️",
+            callback_data=f"admin_stats:sessions_page:{user_id}:{mode}:{page + 1}:{normalized}",
+        )
+    kb.button(text="↩️ К полной статистике", callback_data=f"admin_stats:full:{user_id}:{mode}:{normalized}")
+    kb.adjust(2, 1)
+    return kb
+
+
+def _render_admin_session_details_page(snapshot: UserStatsSnapshot, cards, page: int) -> str:
+    total = len(cards)
+    username = snapshot.username or f"id:{snapshot.user_id}"
+    return (
+        f"Полные данные по собесу для @{username}:\n"
+        f"— Срез: {snapshot.track_slice_label}\n"
+        f"— Карточка: {page + 1} из {total}\n\n"
+        f"{format_detailed_session_card(cards[page])}"
+    )
+
+
 def _render_breakdown(title: str, rows: list[tuple[str, int, float | None]]) -> str:
     if not rows:
         return f"{title}:\n  • нет данных"
@@ -54,39 +97,32 @@ def _render_breakdown(title: str, rows: list[tuple[str, int, float | None]]) -> 
 
 def _render_admin_summary(snapshot: UserStatsSnapshot, mode: str) -> str:
     username = snapshot.username or f"id:{snapshot.user_id}"
-    if mode == "student":
-        avg = f"{snapshot.avg_as_candidate:.2f}" if snapshot.avg_as_candidate is not None else "нет данных"
-        return (
-            f"Админ-статистика для @{username} (как кандидат):\n"
-            f"— Срез: {snapshot.track_slice_label}\n"
-            f"— Всего собесов в роли кандидата: {snapshot.candidate_sessions_count}\n"
-            f"— Средняя оценка как кандидата: {avg}"
-        ) + f"\n— Динамика: {format_trend_brief('кандидат', snapshot.trend_as_candidate)}"
+    avg_candidate = f"{snapshot.avg_as_candidate:.2f}" if snapshot.avg_as_candidate is not None else "нет данных"
+    avg_interviewer = f"{snapshot.avg_as_interviewer:.2f}" if snapshot.avg_as_interviewer is not None else "нет данных"
+    mode_title = "кандидат" if mode == "student" else "интервьюер"
 
-    avg = f"{snapshot.avg_as_interviewer:.2f}" if snapshot.avg_as_interviewer is not None else "нет данных"
     return (
-        f"Админ-статистика для @{username} (как интервьюер):\n"
+        f"Админ-статистика для @{username} (кратко):\n"
         f"— Срез: {snapshot.track_slice_label}\n"
-        f"— Всего собесов в роли интервьюера: {snapshot.interviewer_sessions_count}\n"
-        f"— Средняя оценка как интервьюера: {avg}"
-    ) + f"\n— Динамика: {format_trend_brief('интервьюер', snapshot.trend_as_interviewer)}"
+        f"— Выбранный режим: {mode_title}\n"
+        f"— Собесов, где пользователь был интервьюером: {snapshot.interviewer_sessions_count}\n"
+        f"— Собесов, где пользователь был кандидатом: {snapshot.candidate_sessions_count}\n"
+        f"— Средняя оценка как кандидата: {avg_candidate}\n"
+        f"— Средняя оценка как интервьюера: {avg_interviewer}\n\n"
+        f"— Динамика оценок как кандидата (последние 20): {format_trend_brief('оценки', snapshot.trend_as_candidate)}\n"
+        f"— Динамика оценок как интервьюера (последние 20): {format_trend_brief('оценки', snapshot.trend_as_interviewer)}"
+    )
 
 
 def _render_admin_full(snapshot: UserStatsSnapshot, mode: str) -> str:
     username = snapshot.username or f"id:{snapshot.user_id}"
-    if mode == "student":
-        return (
-            f"Админ-статистика для @{username} (как кандидат, полная):\n\n"
-            f"{_render_admin_summary(snapshot, mode)}\n\n"
-            f"{_render_breakdown('Разбивка по трекам как кандидат (внутри среза)', snapshot.candidate_track_breakdown)}\n\n"
-            f"Последние 5 сессий как кандидат:\n{format_recent_cards(snapshot.recent_as_candidate, 'интервьюер')}"
-        )
-
     return (
-        f"Админ-статистика для @{username} (как интервьюер, полная):\n\n"
+        f"Админ-статистика для @{username} (полная):\n\n"
         f"{_render_admin_summary(snapshot, mode)}\n\n"
+        f"{_render_breakdown('Разбивка по трекам как кандидат (внутри среза)', snapshot.candidate_track_breakdown)}\n\n"
         f"{_render_breakdown('Разбивка по трекам как интервьюер (внутри среза)', snapshot.interviewer_track_breakdown)}\n\n"
-        f"Последние 5 сессий как интервьюер:\n{format_recent_cards(snapshot.recent_as_interviewer, 'кандидат')}"
+        f"Последние 5 сессий как интервьюер:\n{format_recent_cards(snapshot.recent_as_interviewer, 'кандидат')}\n\n"
+        f"Последние 5 сессий как кандидат:\n{format_recent_cards(snapshot.recent_as_candidate, 'интервьюер')}"
     )
 
 
@@ -107,6 +143,39 @@ def _parse_admin_payload(callback_data: str, action: str) -> tuple[int, str, str
     except ValueError:
         return None
     return user_id, mode, normalize_track_slice(track_slice)
+
+
+def _parse_admin_session_open_payload(callback_data: str) -> tuple[int, str, str] | None:
+    prefix = "admin_stats:sessions_open:"
+    if not callback_data.startswith(prefix):
+        return None
+    payload = callback_data[len(prefix) :].split(":")
+    if len(payload) < 3:
+        return None
+    try:
+        user_id = int(payload[0])
+    except ValueError:
+        return None
+    mode = payload[1]
+    track_slice = normalize_track_slice(payload[2])
+    return user_id, mode, track_slice
+
+
+def _parse_admin_session_page_payload(callback_data: str) -> tuple[int, str, int, str] | None:
+    prefix = "admin_stats:sessions_page:"
+    if not callback_data.startswith(prefix):
+        return None
+    payload = callback_data[len(prefix) :].split(":")
+    if len(payload) < 4:
+        return None
+    try:
+        user_id = int(payload[0])
+        page = int(payload[2])
+    except ValueError:
+        return None
+    mode = payload[1]
+    track_slice = normalize_track_slice(payload[3])
+    return user_id, mode, page, track_slice
 
 
 @router.callback_query(F.data == "menu:admin_stats")
@@ -176,7 +245,7 @@ async def admin_stats_slice(callback: CallbackQuery):
     if not parsed:
         await callback.answer("Некорректные данные", show_alert=True)
         return
-    user_id, mode, track_slice = parsed
+    user_id, _mode, track_slice = parsed
 
     async with SessionLocal() as session:
         db_user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
@@ -211,7 +280,76 @@ async def admin_stats_full(callback: CallbackQuery):
             return
         snapshot = await collect_user_stats(session, db_user, track_slice=track_slice)
 
-    await callback.message.answer(_render_admin_full(snapshot, mode))
+    await callback.message.answer(
+        _render_admin_full(snapshot, mode),
+        reply_markup=_admin_stats_full_keyboard(db_user.id, mode, snapshot.track_slice).as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_stats:sessions_open:"))
+async def admin_stats_sessions_open(callback: CallbackQuery):
+    if callback.from_user.id not in settings.admin_ids:
+        await callback.answer("Только для админа", show_alert=True)
+        return
+
+    parsed = _parse_admin_session_open_payload(callback.data)
+    if not parsed:
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+    user_id, mode, track_slice = parsed
+
+    async with SessionLocal() as session:
+        db_user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        if not db_user:
+            await callback.answer("Пользователь не найден", show_alert=True)
+            return
+        snapshot = await collect_user_stats(session, db_user, track_slice=track_slice)
+        cards = await collect_user_session_details(session, db_user, track_slice=track_slice)
+
+    if not cards:
+        await callback.message.answer("По выбранному срезу нет сессий для детального просмотра.")
+        await callback.answer()
+        return
+
+    await callback.message.answer(
+        _render_admin_session_details_page(snapshot, cards, page=0),
+        reply_markup=_admin_sessions_keyboard(user_id, mode, 0, len(cards), track_slice).as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_stats:sessions_page:"))
+async def admin_stats_sessions_page(callback: CallbackQuery):
+    if callback.from_user.id not in settings.admin_ids:
+        await callback.answer("Только для админа", show_alert=True)
+        return
+
+    parsed = _parse_admin_session_page_payload(callback.data)
+    if not parsed:
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+    user_id, mode, requested_page, track_slice = parsed
+
+    async with SessionLocal() as session:
+        db_user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        if not db_user:
+            await callback.answer("Пользователь не найден", show_alert=True)
+            return
+        snapshot = await collect_user_stats(session, db_user, track_slice=track_slice)
+        cards = await collect_user_session_details(session, db_user, track_slice=track_slice)
+
+    if not cards:
+        await callback.answer("Сессии не найдены", show_alert=True)
+        return
+
+    page = max(0, min(requested_page, len(cards) - 1))
+    text = _render_admin_session_details_page(snapshot, cards, page=page)
+    markup = _admin_sessions_keyboard(user_id, mode, page, len(cards), track_slice).as_markup()
+    try:
+        await callback.message.edit_text(text, reply_markup=markup)
+    except Exception:
+        await callback.message.answer(text, reply_markup=markup)
     await callback.answer()
 
 
@@ -234,25 +372,17 @@ async def admin_stats_graph(callback: CallbackQuery):
             return
         snapshot = await collect_user_stats(session, db_user, track_slice=track_slice)
 
-    if mode == "student":
-        candidate_points = snapshot.candidate_points
-        interviewer_points = []
-    else:
-        candidate_points = []
-        interviewer_points = snapshot.interviewer_points
-
-    if not candidate_points and not interviewer_points:
+    if not snapshot.candidate_points and not snapshot.interviewer_points:
         await callback.message.answer("Недостаточно данных для графика: нет оценок с итогом (0..3).")
         await callback.answer()
         return
 
-    png = build_user_stats_png(candidate_points, interviewer_points)
+    png = build_user_stats_png(snapshot.candidate_points, snapshot.interviewer_points)
     photo = BufferedInputFile(png, filename="admin_stats_trend.png")
     await callback.message.answer_photo(
         photo=photo,
         caption=(
             f"График пользователя @{snapshot.username or snapshot.user_id}.\n"
-            f"Режим: {'кандидат' if mode == 'student' else 'интервьюер'}\n"
             f"Срез: {snapshot.track_slice_label}"
         ),
     )

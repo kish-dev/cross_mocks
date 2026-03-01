@@ -6,7 +6,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.bot.routers.admin_stats import _render_admin_full, _render_admin_summary
 from app.bot.routers.stats import _render_user_full, _render_user_summary
-from app.services.stats_analytics import SessionCard, TrendMetrics, UserStatsSnapshot
+from app.services.stats_analytics import SessionCard, SessionDetailedCard, TrendMetrics, UserStatsSnapshot, format_detailed_session_card
 
 
 def _snapshot() -> UserStatsSnapshot:
@@ -85,10 +85,44 @@ def test_admin_stats_text_contains_required_sections():
     summary_student = _render_admin_summary(snapshot, "student")
     full_interviewer = _render_admin_full(snapshot, "interviewer")
 
+    assert "кратко" in summary_student
     assert "как кандидат" in summary_student
-    assert "Динамика:" in summary_student
+    assert "как интервьюера" in summary_student
     assert "Срез: Общая" in summary_student
-    assert "как интервьюер, полная" in full_interviewer
+    assert "полная" in full_interviewer
+    assert "Разбивка по трекам как кандидат" in full_interviewer
     assert "Разбивка по трекам как интервьюер" in full_interviewer
     assert "session_id=202" in full_interviewer
     assert "|" not in full_interviewer
+
+
+def test_detailed_session_card_contains_full_meeting_and_feedback_data():
+    card = SessionDetailedCard(
+        session_id=321,
+        starts_at=datetime(2026, 2, 10, 19, 0),
+        ends_at=datetime(2026, 2, 10, 20, 0),
+        track_code="sysdesign",
+        status="completed",
+        meeting_url="https://telemost.yandex.ru/j/abcd",
+        set_title="System Design Deep Dive",
+        candidate_username="cand",
+        candidate_tg_user_id=777,
+        interviewer_username="mentor",
+        interviewer_tg_user_id=888,
+        candidate_score=3,
+        candidate_comment="Итог: 3.0\nВсе понравилось",
+        interviewer_score=2,
+        interviewer_comment="Итог: 2.0\nНужно подтянуть архитектуру",
+        viewer_role="candidate",
+    )
+
+    text = format_detailed_session_card(card)
+    assert "session_id=321" in text
+    assert "назначение: system-design" in text
+    assert "встреча: https://telemost.yandex.ru/j/abcd" in text
+    assert "фидбек кандидата: 3.0" in text
+    assert "фидбек интервьюера: 2.0" in text
+    assert '"Итог: 3.0' in text
+    assert '"Итог: 2.0' in text
+    assert "@cand" in text
+    assert "@mentor" in text
