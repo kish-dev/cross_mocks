@@ -40,6 +40,25 @@ MVP Telegram-бота для парных мок-собеседований.
 
 Рекомендация: VPS + Docker Compose + `restart: unless-stopped`.
 
+## Railway: быстрый деплой (polling worker)
+В репозитории уже есть `railway.json` с:
+- сборкой через `Dockerfile`;
+- `preDeployCommand`: `python -m app.bootstrap_db` (безопасный `create_all` для пустой БД);
+- `startCommand`: `python -m app.main`.
+
+Что сделать в Railway:
+1. Создать проект из GitHub-репозитория.
+2. Добавить сервисы Postgres и Redis в этот же project.
+3. В сервис бота добавить Variables по шаблону `.env.railway.example`:
+   - обязательные: `BOT_TOKEN`, `PRIVATE_GROUP_ID`, `ADMIN_TG_IDS`, `DATABASE_URL`, `REDIS_URL`;
+   - опциональные: `APP_TZ`, `MEETING_PROVIDER`, `DEFAULT_DURATION_MIN`, `TELEMOST_URL`, `GOOGLE_*`.
+4. Убедиться, что сервис запущен как worker (бот использует polling, не webhook).
+5. Проверить логи после деплоя: бот должен выйти в polling без crash-loop.
+
+Примечание по `DATABASE_URL`:
+- если Railway выдает `postgresql://...`, приложение автоматически конвертирует URL в `postgresql+asyncpg://...`.
+- если укажешь `postgresql+asyncpg://...` сразу, тоже корректно.
+
 ## Миграции и данные
 - Используется Alembic baseline: `0001_baseline`
 - Данные Postgres хранятся в named volume `tgmocks_db_data` и не удаляются при `restart`/`up --build -d`.
